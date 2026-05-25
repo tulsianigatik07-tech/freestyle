@@ -18,11 +18,6 @@ Freestyle is the dictation app that converts your voice into text. Hold down a h
 
 Freestyle is free, open source, and local first, ensuring your dictations are private and never leaves your device. 
 
-
-<p align="center">
-  <img src="media/home-page-demo.png" alt="Freestyle" width="800" />
-</p>
-
 ### Features
 
 - **Voice dictation** — hold the hotkey, speak, release to paste at your cursor in milliseconds.
@@ -30,6 +25,10 @@ Freestyle is free, open source, and local first, ensuring your dictations are pr
 - **Transcription cleaning** — grammer and punctuation cleanup via post-processing. No more "um, oh, but".
 - **Dictionary** — custom phrase replacements applied after transcription. (ex. `"type script"` → `TypeScript`).
 - **Contextual correction** — reformat your text based on where you're typing. Automatically format emails into email format. 
+
+<p align="center">
+  <img src="media/home-page-demo.png" alt="Freestyle" width="800" />
+</p>
 
 ## Download
 
@@ -44,7 +43,7 @@ Freestyle is free, open source, and local first, ensuring your dictations are pr
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, local development, and opening up a PR. 
 
-Consider joining our [Discord channel]((https://discord.gg/Fmgt5yZCDu))! That's where project contributors communicate. 
+Consider joining our [Discord server]((https://discord.gg/Fmgt5yZCDu))! That's where project contributors communicate. 
 
 ## License
 

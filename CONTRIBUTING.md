@@ -1,6 +1,24 @@
-# Contributing to Freestyle
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="media/freestyle-logo-full-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="media/freestyle-logo-full-light.png">
+    <img alt="Freestyle" src="media/freestyle-logo-full-light.png" width="420">
+  </picture>
+</p>
 
-Thanks for your interest in contributing.
+# Contributing
+
+First, thank you so much for considering contributing to the project. Contributors mean a lot to us, it's people like you that grow our community and make this project so fun to work on. 
+
+## Join our Discord
+
+<p align="left">
+  <a href="https://discord.gg/Fmgt5yZCDu"><img src="https://img.shields.io/badge/Discord-Join%20Server-5865F2.svg?style=for-the-badge&logo=discord&logoColor=white" alt="Discord" /></a>
+</p>
+
+Please consider joining our Discord server. This is where contributors communicate. We have all project discussions there. 
+
+If you have any questions, our Discord server is the place to ask. 
 
 ## Prerequisites
 
@@ -52,12 +70,6 @@ pnpm --filter @freestyle/electron build:linux
 - `apps/electron` — Electron desktop app (main process + React renderer)
 - `apps/server` — Hono API server (embedded in the Electron app)
 
-The server is a workspace dependency of the Electron app. Turborepo ensures it's built first.
-
-- **Electron main process** — system tray, global hotkey (`node-global-key-listener`), non-focusable pill window, IPC bridge
-- **Renderer** — React 19 + react-router, shadcn/ui components, Tailwind CSS v4, Three.js orb visualization
-- **Server** — Hono HTTP + WebSocket, AI SDK for transcription, SQLite for settings/history/API keys
-
 ## Development workflow
 
 1. Create a branch from `main`
@@ -82,10 +94,3 @@ feat: add new feature
 fix: resolve a bug
 chore: maintenance task
 ```
-
-## Architecture notes
-
-- The pill window uses `focusable: false` and `showInactive()` to avoid stealing focus
-- Global hotkey uses `node-global-key-listener` for key-up detection (hold-to-record)
-- The server runs on a dynamic local port, exposed to the renderer via IPC
-- API keys are stored in SQLite in the user data directory
