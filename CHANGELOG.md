@@ -1,4 +1,8 @@
 # Changelog
+## 0.0.5
+
+- Update electron.vite.config.ts by @MathurAditya724 in [9dbb47e4](https://github.com/freestyle-voice/freestyle/commit/9dbb47e41e20b5476f832984f0610fe0a46af14e)
+
 ## 0.0.4
 
 ### New Features ✨
