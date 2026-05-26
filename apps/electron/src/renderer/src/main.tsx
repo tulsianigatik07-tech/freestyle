@@ -1,3 +1,8 @@
+import { init as electronRendererInit } from "@sentry/electron/renderer";
+import { init as reactInit } from "@sentry/react";
+
+electronRendererInit({}, reactInit);
+
 import "./globals.css";
 
 import { TooltipProvider } from "@renderer/components/ui/tooltip";
