@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { getDb } from "../lib/db.js";
 import { postProcess } from "../lib/post-process.js";
 import { getDefaultModels } from "../lib/providers.js";
+import { stripProviderPrefix } from "../lib/streaming/types.js";
 import {
   getApiKeyForProvider,
   openStreamingSession,
@@ -49,10 +50,6 @@ const stream = new Hono().get(
         return;
       }
 
-      const modelShort = defaults.voice.model_id.includes("/")
-        ? defaults.voice.model_id.split("/").pop()!
-        : defaults.voice.model_id;
-
       const canStream = supportsStreaming(
         defaults.voice.provider,
         defaults.voice.model_id,
@@ -61,7 +58,7 @@ const stream = new Hono().get(
       ws.send(
         JSON.stringify({
           type: "config",
-          model: modelShort,
+          model: stripProviderPrefix(defaults.voice.model_id),
           streaming: canStream,
         }),
       );
@@ -83,8 +80,9 @@ const stream = new Hono().get(
       } catch {}
 
       upstream = openStreamingSession({
+        providerId: defaults.voice.provider,
         apiKey,
-        model: modelShort,
+        model: defaults.voice.model_id,
         prompt,
         callbacks: {
           onReady: (model) => {
@@ -102,7 +100,6 @@ const stream = new Hono().get(
               );
             }
 
-            // Skip empty transcriptions entirely — don't send to client
             if (!rawText?.trim()) {
               ws.send(JSON.stringify({ type: "final", text: "" }));
               return;
@@ -185,13 +182,11 @@ const stream = new Hono().get(
       },
 
       onMessage(event, ws) {
-        // Binary data = audio chunk
         if (event.data instanceof ArrayBuffer) {
           upstream?.sendAudio(event.data);
           return;
         }
 
-        // Text data = JSON command
         let msg: {
           type: string;
           context?: string;

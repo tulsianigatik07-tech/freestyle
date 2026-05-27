@@ -196,7 +196,7 @@ function getAppWindowPosition(): { x: number; y: number } {
   // Read pill position preference
   const position = (readSettings().pillPosition as string) || "bottom-center";
 
-  const margin = 20;
+  const margin = 10;
   switch (position) {
     case "top-center":
       return { x: Math.round((width - APP_WIDTH) / 2), y: margin };
@@ -948,7 +948,7 @@ app.whenReady().then(async () => {
   // Check if a Freestyle server is already running on the default port.
   let existingServer = false;
   try {
-    const res = await net.fetch(`http://localhost:${DEFAULT_PORT}/api/health`);
+    const res = await net.fetch(`http://127.0.0.1:${DEFAULT_PORT}/api/health`);
     if (res.ok) {
       const data = (await res.json()) as { status?: string; name?: string };
       existingServer = data?.status === "ok" && data?.name === "freestyle";
