@@ -40,8 +40,8 @@ import { MicListener } from "./mic-listener";
 import { pasteIntoFocusedApp } from "./paste";
 
 const DEFAULT_PORT = 4649;
-const APP_WIDTH = 440;
-const APP_HEIGHT = 120;
+const APP_WIDTH = 260;
+const APP_HEIGHT = 90;
 const APP_BOTTOM_MARGIN = 0;
 
 // ---------------------------------------------------------------------------
@@ -146,21 +146,25 @@ function getAppWindowPosition(): { x: number; y: number } {
   // Read pill position preference
   const position = (readSettings().pillPosition as string) || "bottom-center";
 
-  const margin = 10;
+  // The pill is aligned inside the window via CSS (justify-center or
+  // justify-end). Push bottom positions 10px past the work area edge
+  // so the pill sits closer to the dock/taskbar.
+  const bottomOverlap = 14;
+  const topOverlap = 0;
   switch (position) {
     case "top-center":
-      return { x: Math.round((width - APP_WIDTH) / 2), y: margin };
+      return { x: Math.round((width - APP_WIDTH) / 2), y: topOverlap };
     case "top-right":
-      return { x: width - APP_WIDTH - margin, y: margin };
+      return { x: width - APP_WIDTH, y: topOverlap };
     case "bottom-right":
       return {
-        x: width - APP_WIDTH - margin,
-        y: height - APP_HEIGHT - margin,
+        x: width - APP_WIDTH,
+        y: height - APP_HEIGHT + bottomOverlap,
       };
     default:
       return {
         x: Math.round((width - APP_WIDTH) / 2),
-        y: height - APP_HEIGHT - APP_BOTTOM_MARGIN,
+        y: height - APP_HEIGHT + bottomOverlap,
       };
   }
 }
@@ -915,6 +919,12 @@ app.whenReady().then(async () => {
 
   ipcMain.on("settings:set-pill-position", (_event, position: string) => {
     writeSettings({ pillPosition: position });
+    // Reposition the window and notify the renderer for CSS alignment
+    if (mainWindow) {
+      const { x, y } = getAppWindowPosition();
+      mainWindow.setPosition(x, y);
+    }
+    mainWindow?.webContents.send("settings:pill-position-changed", position);
   });
 
   // Register hold-to-record hotkey via native platform binary
