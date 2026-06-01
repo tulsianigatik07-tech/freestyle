@@ -6,6 +6,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { getDb } from "../lib/db.js";
 import { applyMlxAsrRetentionPolicy } from "../lib/mlx-asr/server.js";
+import { capture } from "../lib/posthog.js";
 
 const settings = new Hono()
   .get("/", (c) => {
@@ -45,6 +46,12 @@ const settings = new Hono()
 
     if (key === "mlx_asr_keep_alive_minutes") {
       applyMlxAsrRetentionPolicy();
+    }
+
+    // Don't capture internal/system keys
+    const skipKeys = new Set(["posthog_device_id", "telemetry_enabled"]);
+    if (!skipKeys.has(key)) {
+      capture("setting updated", { key });
     }
 
     return c.json({ key, value: body.value });

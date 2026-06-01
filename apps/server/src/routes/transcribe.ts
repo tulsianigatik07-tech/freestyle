@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { getDb } from "../lib/db.js";
 import { postProcess } from "../lib/post-process.js";
+import { capture, captureException } from "../lib/posthog.js";
 import { getDefaultModels } from "../lib/providers.js";
-import { captureException, metrics } from "../lib/sentry.js";
 import { getProvider } from "../lib/streaming/registry.js";
 import { getApiKeyForProvider } from "../lib/streaming-stt.js";
 import { resolveAsrVocabularyBias } from "../lib/vocabulary-bias.js";
@@ -99,9 +99,14 @@ const transcribeRoute = new Hono().post("/", async (c) => {
       );
     }
   } catch (err) {
-    captureException(err);
-    metrics.count("transcription.error", 1, {
-      attributes: { provider: defaults.voice.provider },
+    captureException(err, {
+      provider: defaults.voice.provider,
+      model: defaults.voice.model_id,
+    });
+    capture("transcription failed", {
+      provider: defaults.voice.provider,
+      model: defaults.voice.model_id,
+      error: err instanceof Error ? err.message : String(err),
     });
     return c.json(
       {
@@ -113,22 +118,6 @@ const transcribeRoute = new Hono().post("/", async (c) => {
   }
 
   const durationMs = Date.now() - start;
-
-  const tags = {
-    provider: defaults.voice.provider,
-    model: defaults.voice.model_id,
-  };
-  metrics.count("transcription.count", 1, { attributes: tags });
-  metrics.distribution("transcription.latency", durationMs, {
-    unit: "millisecond",
-    attributes: tags,
-  });
-  if (audioDurationMs > 0) {
-    metrics.distribution("transcription.audio_duration", audioDurationMs, {
-      unit: "millisecond",
-      attributes: tags,
-    });
-  }
 
   if (!rawText.trim()) {
     return c.json({
@@ -161,6 +150,14 @@ const transcribeRoute = new Hono().post("/", async (c) => {
       .catch((err) => {
         console.error("Failed to save history:", err);
       });
+
+    capture("transcription completed", {
+      provider: voiceProvider,
+      model: voiceModel,
+      duration_ms: durationMs,
+      audio_duration_ms: audioDurationMs,
+      post_processed: false,
+    });
 
     return c.json({
       raw: rawText,
@@ -205,6 +202,19 @@ const transcribeRoute = new Hono().post("/", async (c) => {
   if (isDev) {
     console.log(`[transcribe] total ${Date.now() - start}ms`);
   }
+
+  capture("transcription completed", {
+    provider: voiceProvider,
+    model: voiceModel,
+    duration_ms: durationMs,
+    audio_duration_ms: audioDurationMs,
+    post_processed: true,
+    llm_provider: pp.llmProvider,
+    llm_model: pp.llmModel,
+    input_tokens: pp.inputTokens,
+    output_tokens: pp.outputTokens,
+    cost_usd: pp.costUsd,
+  });
 
   return c.json({
     raw: rawText,

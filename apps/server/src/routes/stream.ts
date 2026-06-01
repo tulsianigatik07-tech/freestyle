@@ -2,8 +2,8 @@ import { upgradeWebSocket } from "@hono/node-server";
 import { Hono } from "hono";
 import { getDb } from "../lib/db.js";
 import { postProcess } from "../lib/post-process.js";
+import { capture, captureException } from "../lib/posthog.js";
 import { getDefaultModels } from "../lib/providers.js";
-import { captureException, metrics } from "../lib/sentry.js";
 import { stripProviderPrefix } from "../lib/streaming/types.js";
 import {
   getApiKeyForProvider,
@@ -91,10 +91,6 @@ const stream = new Hono().get(
         true,
       );
 
-      metrics.count("streaming.session_opened", 1, {
-        attributes: { provider: defaults.voice.provider },
-      });
-
       const session = openStreamingSession({
         providerId: defaults.voice.provider,
         apiKey,
@@ -115,25 +111,6 @@ const stream = new Hono().get(
             if (upstream !== session) return;
             const durationMs = Date.now() - sessionStartTime;
 
-            const streamTags = {
-              provider: voiceDefaults!.provider,
-              model: voiceDefaults!.model_id,
-            };
-            metrics.count("streaming.transcription_count", 1, {
-              attributes: streamTags,
-            });
-            metrics.distribution("streaming.latency", durationMs, {
-              unit: "millisecond",
-              attributes: streamTags,
-            });
-            if (audioDurationMs > 0) {
-              metrics.distribution(
-                "streaming.audio_duration",
-                audioDurationMs,
-                { unit: "millisecond", attributes: streamTags },
-              );
-            }
-
             if (!rawText?.trim()) {
               ws.send(JSON.stringify({ type: "final", text: "" }));
               return;
@@ -141,6 +118,17 @@ const stream = new Hono().get(
 
             postProcess(rawText, appContext)
               .then((pp) => {
+                capture("streaming transcription completed", {
+                  provider: voiceDefaults!.provider,
+                  model: voiceDefaults!.model_id,
+                  duration_ms: durationMs,
+                  audio_duration_ms: audioDurationMs,
+                  llm_provider: pp.llmProvider,
+                  llm_model: pp.llmModel,
+                  input_tokens: pp.inputTokens,
+                  output_tokens: pp.outputTokens,
+                  cost_usd: pp.costUsd,
+                });
                 if (!closed) {
                   ws.send(JSON.stringify({ type: "final", text: pp.cleaned }));
                 }
