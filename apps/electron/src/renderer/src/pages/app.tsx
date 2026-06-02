@@ -277,6 +277,9 @@ export default function AppPage(): React.JSX.Element {
       streamerRef.current = new Streamer(getApiBase(), {
         onConfig: (config) => {
           useStreamingRef.current = config.streaming;
+          if (wantsMicRef.current) {
+            sessionStreamingRef.current = config.streaming;
+          }
         },
         onReady: () => {},
         onPartial: () => {},
@@ -512,8 +515,9 @@ export default function AppPage(): React.JSX.Element {
       }
 
       appContextRef.current = null;
+      const streamer = getStreamer();
       try {
-        getStreamer().setContext(null);
+        streamer.setContext(null);
       } catch {}
 
       window.api
@@ -521,13 +525,13 @@ export default function AppPage(): React.JSX.Element {
         .then((app) => {
           appContextRef.current = app;
           try {
-            getStreamer().setContext(app);
+            streamer.setContext(app);
           } catch {}
         })
         .catch(() => {
           appContextRef.current = null;
           try {
-            getStreamer().setContext(null);
+            streamer.setContext(null);
           } catch {}
         });
 
@@ -538,9 +542,7 @@ export default function AppPage(): React.JSX.Element {
 
       try {
         sessionStreamingRef.current = useStreamingRef.current;
-        const stream = await (sessionStreamingRef.current
-          ? recorderRef.current.acquireStream()
-          : recorderRef.current.start());
+        const stream = await recorderRef.current.acquireStream();
 
         if (!wantsMicRef.current) {
           recorderRef.current.cancel();
@@ -567,7 +569,7 @@ export default function AppPage(): React.JSX.Element {
 
         startListening(stream);
         try {
-          await getStreamer().startCapture(stream);
+          await streamer.startCapture(stream);
         } catch {}
       } catch (err) {
         wantsMicRef.current = false;

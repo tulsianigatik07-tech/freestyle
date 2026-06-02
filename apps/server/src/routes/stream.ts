@@ -13,6 +13,8 @@ import {
 } from "../lib/streaming-stt.js";
 import { resolveAsrVocabularyBias } from "../lib/vocabulary-bias.js";
 
+const LOG_STREAM_PARTIALS = process.env.FREESTYLE_LOG_STREAM_PARTIALS === "1";
+
 const stream = new Hono().get(
   "/",
   upgradeWebSocket(() => {
@@ -25,7 +27,10 @@ const stream = new Hono().get(
     let audioDurationMs = 0;
     /** Audio received while the upstream socket is still connecting. */
     let pendingAudioChunks: ArrayBuffer[] = [];
+    let pendingCommit = false;
     let reconnectAttempts = 0;
+    let readyToken = 0;
+    let notifiedReadyToken = 0;
     const MAX_RECONNECT_ATTEMPTS = 3;
 
     function flushPendingAudio(): void {
@@ -34,6 +39,45 @@ const stream = new Hono().get(
         upstream.sendAudio(chunk);
       }
       pendingAudioChunks = [];
+    }
+
+    function notifySessionReady(
+      ws: { send: (data: string) => void },
+      model: string,
+      token: number,
+    ): void {
+      if (token !== readyToken || notifiedReadyToken === token) return;
+      notifiedReadyToken = token;
+      flushPendingAudio();
+      ws.send(JSON.stringify({ type: "session.ready", model }));
+      if (pendingCommit) {
+        pendingCommit = false;
+        upstream?.commit();
+      }
+    }
+
+    function afterSessionReady(
+      ws: { send: (data: string) => void },
+      session: StreamSession,
+      model: string,
+      token: number,
+    ): void {
+      const ready = session.waitUntilReady?.();
+      if (!ready) return;
+      void ready
+        .then(() => {
+          if (closed || upstream !== session) return;
+          notifySessionReady(ws, model, token);
+        })
+        .catch((err: Error) => {
+          if (closed) return;
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              message: err.message,
+            }),
+          );
+        });
     }
 
     function connectUpstream(ws: {
@@ -81,6 +125,8 @@ const stream = new Hono().get(
       );
 
       if (!canStream) {
+        readyToken++;
+        notifiedReadyToken = readyToken;
         ws.send(JSON.stringify({ type: "session.ready", model: modelShort }));
         return;
       }
@@ -91,20 +137,25 @@ const stream = new Hono().get(
         true,
       );
 
+      const token = ++readyToken;
       const session = openStreamingSession({
         providerId: defaults.voice.provider,
         apiKey,
         model: defaults.voice.model_id,
         bias,
         callbacks: {
-          onReady: (model) => {
+          onReady: (readyModel) => {
             if (upstream !== session) return;
             reconnectAttempts = 0;
-            flushPendingAudio();
-            ws.send(JSON.stringify({ type: "session.ready", model }));
+            notifySessionReady(ws, readyModel || modelShort, token);
           },
           onPartial: (text) => {
             if (upstream !== session) return;
+            if (LOG_STREAM_PARTIALS) {
+              console.log(
+                `[stream partial] ${defaults.voice!.provider}/${modelShort}: ${text}`,
+              );
+            }
             ws.send(JSON.stringify({ type: "partial", text }));
           },
           onFinal: (rawText) => {
@@ -207,6 +258,9 @@ const stream = new Hono().get(
         },
       });
       upstream = session;
+      if (canStream) {
+        afterSessionReady(ws, session, modelShort, token);
+      }
     }
 
     return {
@@ -239,7 +293,10 @@ const stream = new Hono().get(
                     (data as Buffer).byteOffset,
                     (data as Buffer).byteOffset + (data as Buffer).byteLength,
                   ) as ArrayBuffer);
-          if (!upstream) {
+          if (
+            !upstream ||
+            (!upstream.waitUntilReady && notifiedReadyToken !== readyToken)
+          ) {
             if (pendingAudioChunks.length < 500) {
               pendingAudioChunks.push(buf);
             }
@@ -273,18 +330,19 @@ const stream = new Hono().get(
             audioDurationMs = 0;
             appContext = msg.context ?? null;
             pendingAudioChunks = [];
+            pendingCommit = false;
             reconnectAttempts = 0;
             if (upstream) {
               if (upstream.reset) {
                 upstream.reset();
-                flushPendingAudio();
                 const voice = voiceDefaults ?? getDefaultModels().voice;
-                if (voice) {
-                  ws.send(
-                    JSON.stringify({
-                      type: "session.ready",
-                      model: stripProviderPrefix(voice.model_id),
-                    }),
+                if (voice && upstream.waitUntilReady) {
+                  const token = ++readyToken;
+                  afterSessionReady(
+                    ws,
+                    upstream,
+                    stripProviderPrefix(voice.model_id),
+                    token,
                   );
                 }
               } else {
@@ -311,9 +369,18 @@ const stream = new Hono().get(
             if (msg.context !== undefined) {
               appContext = msg.context;
             }
-            upstream?.commit();
+            if (
+              upstream &&
+              (upstream.waitUntilReady || notifiedReadyToken === readyToken)
+            ) {
+              upstream.commit();
+            } else {
+              pendingCommit = true;
+            }
             break;
           case "cancel":
+            pendingCommit = false;
+            pendingAudioChunks = [];
             upstream?.cancel();
             break;
         }
@@ -322,6 +389,7 @@ const stream = new Hono().get(
       onClose() {
         closed = true;
         pendingAudioChunks = [];
+        pendingCommit = false;
         try {
           upstream?.close();
         } catch {}
@@ -331,6 +399,7 @@ const stream = new Hono().get(
       onError() {
         closed = true;
         pendingAudioChunks = [];
+        pendingCommit = false;
         try {
           upstream?.close();
         } catch {}
