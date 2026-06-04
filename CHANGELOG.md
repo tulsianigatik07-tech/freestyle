@@ -1,4 +1,8 @@
 # Changelog
+## 0.1.5
+
+- Electron paste issue by @matteo8p in [#175](https://github.com/freestyle-voice/freestyle/pull/175)
+
 ## 0.1.4
 
 ### New Features ✨
