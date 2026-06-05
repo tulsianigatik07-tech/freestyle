@@ -1,4 +1,18 @@
 # Changelog
+## 0.1.6
+
+### Bug Fixes 🐛
+
+- Kill whisper-server and other child processes on app quit by @MathurAditya724 in [#193](https://github.com/freestyle-voice/freestyle/pull/193)
+- Remove subtext on the models page by @MFA-G in [#185](https://github.com/freestyle-voice/freestyle/pull/185)
+- Remove subtext on the settings page by @EvolutionX-10 in [#186](https://github.com/freestyle-voice/freestyle/pull/186)
+- Navigate to settings page when clicking update notifications by @MathurAditya724 in [#177](https://github.com/freestyle-voice/freestyle/pull/177)
+
+### Other
+
+- Use `@huggingface/hub` to download MLX models by @matteo8p in [#190](https://github.com/freestyle-voice/freestyle/pull/190)
+- Use Huggingface Hub for model downloads by @matteo8p in [#189](https://github.com/freestyle-voice/freestyle/pull/189)
+
 ## 0.1.5
 
 - Electron paste issue by @matteo8p in [#175](https://github.com/freestyle-voice/freestyle/pull/175)
