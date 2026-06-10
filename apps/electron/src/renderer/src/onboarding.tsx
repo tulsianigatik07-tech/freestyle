@@ -323,6 +323,7 @@ export default function OnboardingPage(): React.JSX.Element {
       model_id: model.model_id,
       kind: "cloud",
       provider: model.provider_id,
+      source: "selector",
     });
   }, []);
 
@@ -343,7 +344,12 @@ export default function OnboardingPage(): React.JSX.Element {
   );
 
   const selectLocalModel = useCallback(
-    (defId: string, name: string, engine?: "whisper" | "mlx") => {
+    (
+      defId: string,
+      name: string,
+      engine?: "whisper" | "mlx",
+      source: "auto" | "selector" = "selector",
+    ) => {
       if (engine === "mlx") {
         setSelectedMlxDefId(defId);
         setSelectedWhisperDefId(null);
@@ -364,6 +370,14 @@ export default function OnboardingPage(): React.JSX.Element {
           },
         })
         .catch(() => {});
+      // The funnel's model-step event: with auto-setup this fires for every
+      // user; `source` separates the silent default from explicit picks.
+      capture("onboarding_model_completed", {
+        model_id: `${provider}/${defId}`,
+        kind: "local",
+        provider,
+        source,
+      });
     },
     [],
   );
@@ -434,6 +448,7 @@ export default function OnboardingPage(): React.JSX.Element {
       recommended.defId,
       recommended.name,
       recommended.localEngine,
+      "auto",
     );
     if (recommended.status === "not_downloaded") {
       capture("onboarding_model_auto_setup", {
@@ -501,8 +516,7 @@ export default function OnboardingPage(): React.JSX.Element {
   }, [chosenStatus, chosenModelId]);
 
   // Persist the language choice (the transcribe path reads it per request).
-  const saveLanguage = useCallback((value: string) => {
-    setLanguage(value);
+  const persistLanguage = useCallback((value: string) => {
     getClient()
       .api.settings[":key"].$put({
         param: { key: "language" },
@@ -510,6 +524,15 @@ export default function OnboardingPage(): React.JSX.Element {
       })
       .catch(() => {});
   }, []);
+
+  const saveLanguage = useCallback(
+    (value: string) => {
+      setLanguage(value);
+      capture("onboarding_language_changed", { language: value });
+      persistLanguage(value);
+    },
+    [persistLanguage],
+  );
 
   // Validate + persist a freshly entered cloud key. Returns true when stored
   // so the selector can commit and close.
@@ -598,10 +621,13 @@ export default function OnboardingPage(): React.JSX.Element {
             onSelect={saveLanguage}
             setupStatus={setupStatus}
             setupError={setupError}
-            onBack={() => setStep("permissions")}
+            onBack={() => {
+              capture("onboarding_language_back_clicked");
+              setStep("permissions");
+            }}
             onContinue={() => {
               // Persist even when the pre-selected locale was never clicked.
-              saveLanguage(language);
+              persistLanguage(language);
               capture("onboarding_language_completed", { language });
               setStep("tutorial");
             }}
