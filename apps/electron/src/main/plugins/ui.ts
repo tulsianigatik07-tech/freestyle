@@ -14,23 +14,15 @@ export const PLUGIN_SCHEME = "freestyle-plugin";
 
 let discovered: DiscoveredPlugin[] = [];
 
-/**
- * Privilege registration for the plugin scheme. Must run before `app.ready`
- * (alongside the `app://` scheme registration).
- */
-export function registerPluginSchemePrivileges(): void {
-  protocol.registerSchemesAsPrivileged([
-    {
-      scheme: PLUGIN_SCHEME,
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        corsEnabled: true,
-      },
-    },
-  ]);
-}
+export const PLUGIN_SCHEME_PRIVILEGE: Electron.CustomScheme = {
+  scheme: PLUGIN_SCHEME,
+  privileges: {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    corsEnabled: true,
+  },
+};
 
 /**
  * Register the `freestyle-plugin://<pluginName>/<assetPath>` handler. Serves

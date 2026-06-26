@@ -110,8 +110,8 @@ import {
 } from "./plugins/index";
 import {
   initPluginUiHost,
+  PLUGIN_SCHEME_PRIVILEGE,
   refreshPluginUi,
-  registerPluginUiPrivileges,
 } from "./plugins/ui-host";
 import type { BridgeConfig } from "./plugins/view-manager";
 
@@ -288,8 +288,6 @@ function stopHotkeyRecorderProcess(): void {
   hotkeyRecorder = null;
 }
 
-// Register a custom app:// protocol that serves the renderer files.
-// All non-file paths fall back to index.html so BrowserRouter works in production.
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "app",
@@ -300,11 +298,8 @@ protocol.registerSchemesAsPrivileged([
       corsEnabled: true,
     },
   },
+  PLUGIN_SCHEME_PRIVILEGE,
 ]);
-
-// Register the freestyle-plugin:// scheme that serves plugin UI assets. Must
-// also run before app.ready.
-registerPluginUiPrivileges();
 
 function registerAppProtocol(): void {
   protocol.handle("app", (request) => {

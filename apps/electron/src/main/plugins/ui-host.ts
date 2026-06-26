@@ -11,7 +11,6 @@ import {
   getDiscoveredPlugins,
   refreshDiscoveredPlugins,
   registerPluginProtocol,
-  registerPluginSchemePrivileges,
 } from "./ui.js";
 import {
   type BridgeConfig,
@@ -55,13 +54,7 @@ export interface PluginUiHostDeps {
 
 let viewManager: PluginViewManager | null = null;
 
-/**
- * Register the plugin scheme privileges. Must run **before** `app.ready`,
- * alongside the `app://` privilege registration.
- */
-export function registerPluginUiPrivileges(): void {
-  registerPluginSchemePrivileges();
-}
+export { PLUGIN_SCHEME_PRIVILEGE } from "./ui.js";
 
 /**
  * Wire up the plugin UI host: the asset protocol, the view manager, and all
