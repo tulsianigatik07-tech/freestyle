@@ -1,4 +1,10 @@
 # Changelog
+## 0.3.3
+
+### New Features ✨
+
+- Add plugin update system with version checking and one-click updates by @MathurAditya724 in [#355](https://github.com/freestyle-voice/freestyle/pull/355)
+
 ## 0.3.2
 
 ### Bug Fixes 🐛
