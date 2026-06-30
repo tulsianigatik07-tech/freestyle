@@ -3,6 +3,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import markDark from "@renderer/assets/mark-dark.svg";
 import markLight from "@renderer/assets/mark-light.svg";
 import { KeyComboDisplay } from "@renderer/components/key-combo";
+import { ModelSetupPanel } from "@renderer/components/model-setup-panel";
 import { TutorialDemo } from "@renderer/components/tutorial-demo";
 import { Button } from "@renderer/components/ui/button";
 import {
@@ -33,7 +34,6 @@ import {
   buildVoiceItems,
   FREESTYLE_CLOUD_MODEL_ID,
   FREESTYLE_CLOUD_PROVIDER_ID,
-  formatBytes,
   type MlxAsrStatus,
   PROVIDER_DISPLAY_NAMES,
   PROVIDER_KEY_URLS,
@@ -132,6 +132,12 @@ export default function OnboardingPage(): React.JSX.Element {
   const [language, setLanguage] = useState<string>(defaultLanguage);
   const autoPicked = useRef(false);
   const warmed = useRef(false);
+  // Tracks the most recent explicit local pick so cloud users who briefly
+  // selected a different on-device model still download the right one.
+  const lastLocalSetupRef = useRef<{
+    defId: string;
+    engine: "whisper" | "mlx";
+  } | null>(null);
   // True once we know whether MLX can run on this machine — so the auto-pick
   // waits for the Qwen-vs-Whisper decision instead of settling on Whisper
   // Base while the MLX status request is still in flight.
@@ -439,9 +445,12 @@ export default function OnboardingPage(): React.JSX.Element {
         if (engine === "mlx") {
           setSelectedMlxDefId(defId);
           setSelectedWhisperDefId(null);
-        } else {
+        } else if (engine === "whisper") {
           setSelectedWhisperDefId(defId);
           setSelectedMlxDefId(null);
+        }
+        if (engine) {
+          lastLocalSetupRef.current = { defId, engine };
         }
         setSelectedModel(null);
       }
@@ -529,19 +538,24 @@ export default function OnboardingPage(): React.JSX.Element {
     mlxQwen && mlxStatus?.canRun ? mlxQwen : (whisperBase ?? mlxQwen);
 
   // Auto-setup: once the MLX capability check and cloud session both settle,
-  // commit a default and start downloads in the background — the user never
-  // has to choose a model. Signed in → Freestyle Cloud is the default; the
-  // on-device model is still set up underneath as an offline/signed-out
-  // fallback. Signed out → the on-device model is the default.
+  // commit a default local model. Signed in → Freestyle Cloud is the default
+  // and the on-device fallback downloads silently in the background. Signed
+  // out → the on-device model is the default; download starts from the
+  // setup panel when the user taps Download.
   useEffect(() => {
     if (
       autoPicked.current ||
       cloudLoading ||
       !mlxResolved ||
-      !recommended?.defId
+      !recommended?.defId ||
+      !recommended.localEngine
     )
       return;
     autoPicked.current = true;
+    lastLocalSetupRef.current = {
+      defId: recommended.defId,
+      engine: recommended.localEngine,
+    };
     selectLocalModel(
       recommended.defId,
       recommended.name,
@@ -549,13 +563,15 @@ export default function OnboardingPage(): React.JSX.Element {
       "auto",
       !cloudUser,
     );
-    if (recommended.status === "not_downloaded" && !window.api?.isE2E) {
-      capture("onboarding_model_auto_setup", {
-        model_id: recommended.modelId,
-      });
-      downloadLocalModel(recommended.defId, recommended.localEngine);
+    if (cloudUser) {
+      commitFreestyleCloudDefault();
+      if (recommended.status === "not_downloaded" && !window.api?.isE2E) {
+        capture("onboarding_model_auto_setup", {
+          model_id: recommended.modelId,
+        });
+        downloadLocalModel(recommended.defId, recommended.localEngine);
+      }
     }
-    if (cloudUser) commitFreestyleCloudDefault();
   }, [
     recommended,
     selectLocalModel,
@@ -677,32 +693,41 @@ export default function OnboardingPage(): React.JSX.Element {
     !!chosen &&
     (chosen.kind === "cloud" ? !!chosen.hasKey : chosen.status === "ready");
 
-  // One quiet line describing the background setup, shown while it runs.
-  // The user never chooses the model, but they should see what's being
-  // installed on their machine — name and size, not a mystery download.
-  const setupStatus = ((): string | null => {
-    if (!chosen || chosen.kind !== "local" || chosenReady) return null;
-    if (chosen.state?.phase === "building_binary") {
-      return "Preparing your transcription engine…";
+  const localSetupModel = ((): VoiceItem | undefined => {
+    if (chosen?.kind === "local") return chosen;
+    if (lastLocalSetupRef.current) {
+      const { defId, engine } = lastLocalSetupRef.current;
+      return allVoiceItems.find(
+        (v) =>
+          v.kind === "local" && v.defId === defId && v.localEngine === engine,
+      );
     }
-    const size =
-      chosen.sizeBytes != null ? ` (${formatBytes(chosen.sizeBytes)})` : "";
-    if (
-      chosen.status === "downloading" ||
-      chosen.status === "verifying" ||
-      chosen.status === "not_downloaded"
-    ) {
-      const p = chosen.state?.downloadProgress;
-      const pct = p?.bytesTotal ? ` ${p.percent}%` : "";
-      return `Downloading ${chosen.name}${size}, your private transcription model…${pct}`;
-    }
-    return null;
+    return recommended;
   })();
+  const showLocalSetupPanel = !cloudUser;
+  const mustHaveLocalReady = chosen?.kind === "local" && !chosenReady;
+  const localSetupActive =
+    localSetupModel?.kind === "local" &&
+    (localSetupModel.status === "downloading" ||
+      localSetupModel.status === "verifying" ||
+      localSetupModel.state?.phase === "building_binary");
 
-  const setupError =
-    chosen?.kind === "local" && chosen.status === "error"
-      ? (chosen.state?.error ?? "Model download failed")
-      : null;
+  const startLocalDownload = useCallback(() => {
+    if (!localSetupModel?.defId || window.api?.isE2E) return;
+    capture("onboarding_model_download_started", {
+      model_id: localSetupModel.modelId,
+    });
+    downloadLocalModel(localSetupModel.defId, localSetupModel.localEngine);
+  }, [localSetupModel, downloadLocalModel]);
+
+  const retryLocalDownload = useCallback(() => {
+    if (!localSetupModel?.defId || window.api?.isE2E) return;
+    capture("onboarding_model_download_started", {
+      model_id: localSetupModel.modelId,
+      retry: true,
+    });
+    downloadLocalModel(localSetupModel.defId, localSetupModel.localEngine);
+  }, [localSetupModel, downloadLocalModel]);
 
   return (
     <div className="bg-background flex h-screen flex-col">
@@ -769,8 +794,9 @@ export default function OnboardingPage(): React.JSX.Element {
           <LanguageStep
             language={language}
             onSelect={saveLanguage}
-            setupStatus={setupStatus}
-            setupError={setupError}
+            localModel={showLocalSetupPanel ? localSetupModel : undefined}
+            onDownloadLocal={startLocalDownload}
+            onRetryLocal={retryLocalDownload}
             onBack={() => {
               capture("onboarding_language_back_clicked");
               setStep("permissions");
@@ -792,8 +818,17 @@ export default function OnboardingPage(): React.JSX.Element {
             captureHint={captureHint}
             modelReady={chosenReady}
             modelName={chosen?.name}
-            setupStatus={setupStatus}
-            setupError={setupError}
+            localModel={showLocalSetupPanel ? localSetupModel : undefined}
+            onDownloadLocal={startLocalDownload}
+            onRetryLocal={retryLocalDownload}
+            canFinish={!mustHaveLocalReady}
+            finishBlockedReason={
+              mustHaveLocalReady
+                ? localSetupActive
+                  ? "downloading"
+                  : "notReady"
+                : null
+            }
             onOpenSelector={() => {
               capture("onboarding_model_selector_opened");
               setShowSelector(true);
@@ -1206,15 +1241,17 @@ function CloudTermsFooter(): React.JSX.Element {
 function LanguageStep({
   language,
   onSelect,
-  setupStatus,
-  setupError,
+  localModel,
+  onDownloadLocal,
+  onRetryLocal,
   onBack,
   onContinue,
 }: {
   language: string;
   onSelect: (id: string) => void;
-  setupStatus: string | null;
-  setupError: string | null;
+  localModel: VoiceItem | undefined;
+  onDownloadLocal: () => void;
+  onRetryLocal: () => void;
   onBack: () => void;
   onContinue: () => void;
 }): React.JSX.Element {
@@ -1249,17 +1286,12 @@ function LanguageStep({
           {t("onboarding.language.autoDetect")}
         </Button>
       </div>
-      {/* Background model setup — quiet status, never a decision. */}
-      {setupStatus && (
-        <p className="mono text-muted-foreground mt-6 text-center text-[11px]">
-          {setupStatus}
-        </p>
-      )}
-      {setupError && (
-        <p className="text-destructive mt-6 text-center text-[12px] leading-snug">
-          {setupError}
-        </p>
-      )}
+
+      <ModelSetupPanel
+        model={localModel}
+        onDownload={onDownloadLocal}
+        onRetry={onRetryLocal}
+      />
 
       <div className="mt-7 flex items-center justify-between">
         <Button variant="outline" onClick={onBack}>
@@ -1591,8 +1623,11 @@ function TutorialStep({
   captureHint,
   modelReady,
   modelName,
-  setupStatus,
-  setupError,
+  localModel,
+  onDownloadLocal,
+  onRetryLocal,
+  canFinish,
+  finishBlockedReason,
   onOpenSelector,
   onStartRecording,
   onCancelRecording,
@@ -1606,8 +1641,11 @@ function TutorialStep({
   captureHint: string;
   modelReady: boolean;
   modelName?: string;
-  setupStatus: string | null;
-  setupError: string | null;
+  localModel: VoiceItem | undefined;
+  onDownloadLocal: () => void;
+  onRetryLocal: () => void;
+  canFinish: boolean;
+  finishBlockedReason: "downloading" | "notReady" | null;
   onOpenSelector: () => void;
   onStartRecording: () => void;
   onCancelRecording: () => void;
@@ -1624,18 +1662,11 @@ function TutorialStep({
         onDictation={onDictation}
       />
 
-      {/* Background setup catching up — practice unlocks when it lands. */}
-      {!modelReady && setupStatus && (
-        <p className="mono text-muted-foreground mt-3 text-center text-[11px]">
-          {t("onboarding.tutorial.almostReady")}
-          {setupStatus.charAt(0).toLowerCase() + setupStatus.slice(1)}
-        </p>
-      )}
-      {!modelReady && setupError && (
-        <p className="text-destructive mt-3 text-center text-[12px]">
-          {setupError}
-        </p>
-      )}
+      <ModelSetupPanel
+        model={localModel}
+        onDownload={onDownloadLocal}
+        onRetry={onRetryLocal}
+      />
 
       {/* The model is visible and changeable here — where it can be tested. */}
       <div className="mt-3 flex justify-center">
@@ -1689,10 +1720,19 @@ function TutorialStep({
         <Button variant="outline" onClick={onBack}>
           {t("common.back")}
         </Button>
-        <Button variant="default" onClick={onFinish}>
-          {t("onboarding.tutorial.finish")}
-          <ArrowRight data-icon="inline-end" />
-        </Button>
+        <div className="flex flex-col items-end gap-1.5">
+          {!canFinish && finishBlockedReason && (
+            <p className="text-muted-foreground text-[11px]">
+              {finishBlockedReason === "downloading"
+                ? t("onboarding.modelSetup.waitingWhileDownloading")
+                : t("onboarding.modelSetup.waitingToFinish")}
+            </p>
+          )}
+          <Button variant="default" onClick={onFinish} disabled={!canFinish}>
+            {t("onboarding.tutorial.finish")}
+            <ArrowRight data-icon="inline-end" />
+          </Button>
+        </div>
       </div>
     </div>
   );
