@@ -110,7 +110,7 @@ function NavList({ items }: { items: NavItem[] }): React.JSX.Element {
                 className={cn(
                   "flex items-center gap-2.5 rounded-[7px] border px-2.5 py-1.5 text-[13px] transition-colors",
                   isActive
-                    ? "border-border bg-card text-foreground font-medium"
+                    ? "glass-nav-active text-foreground font-medium"
                     : "text-secondary-foreground/80 hover:bg-card/50 border-transparent font-normal",
                 )}
               >
@@ -182,9 +182,9 @@ export default function AppShell(): React.JSX.Element {
   }, []);
 
   return (
-    <div className="bg-background flex h-screen min-h-0">
+    <div className="glass-window-shell flex h-screen min-h-0">
       <aside
-        className="border-border bg-sidebar flex w-[220px] shrink-0 flex-col border-r"
+        className="glass-sidebar flex w-[220px] shrink-0 flex-col border-r"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
         {/* Brand row — top padding leaves space for macOS traffic lights */}
@@ -229,10 +229,10 @@ export default function AppShell(): React.JSX.Element {
         <div className="h-3" />
       </aside>
 
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="glass-content relative flex min-h-0 min-w-0 flex-1 flex-col">
         <div
           className={cn(
-            "border-border/70 bg-background/92 absolute top-0 right-0 z-40 flex items-center gap-1.5 rounded-bl-[14px] border-b border-l px-3 py-2 shadow-[0_10px_28px_-22px_rgba(0,0,0,0.55)] backdrop-blur-sm",
+            "glass-topbar absolute top-0 right-0 z-40 flex items-center gap-1.5 rounded-bl-[14px] border-b border-l px-3 py-2",
             onPluginPage && "hidden",
           )}
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
