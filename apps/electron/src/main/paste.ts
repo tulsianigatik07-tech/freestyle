@@ -4,8 +4,10 @@ import {
   execFile,
   spawn,
 } from "node:child_process";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createAppLogger } from "@freestyle-voice/utils";
-import { clipboard } from "electron";
+import { app, clipboard } from "electron";
 import { isLinuxTerminalFocused } from "./linux-terminal-focus";
 import { getNativeBinaryPath } from "./native-binary";
 
@@ -28,9 +30,13 @@ async function tryExecAsync(cmd: string, label: string): Promise<boolean> {
   }
 }
 
-function execFileAsync(path: string, args: string[] = []): Promise<number> {
+function execFileWithOutput(
+  path: string,
+  args: string[] = [],
+  timeoutMs?: number,
+): Promise<{ code: number; stdout: string }> {
   return new Promise((resolve, reject) => {
-    execFile(path, args, (err) => {
+    execFile(path, args, { timeout: timeoutMs }, (err, stdout) => {
       if (err) {
         const status = (err as { status?: unknown }).status;
         const exitCode =
@@ -40,15 +46,23 @@ function execFileAsync(path: string, args: string[] = []): Promise<number> {
               ? err.code
               : undefined;
         if (exitCode !== undefined) {
-          resolve(exitCode);
+          resolve({ code: exitCode, stdout: stdout ?? "" });
         } else {
           reject(err);
         }
       } else {
-        resolve(0);
+        resolve({ code: 0, stdout: stdout ?? "" });
       }
     });
   });
+}
+
+async function execFileAsync(
+  path: string,
+  args: string[] = [],
+): Promise<number> {
+  const { code } = await execFileWithOutput(path, args);
+  return code;
 }
 
 export function isWaylandSession(): boolean {
@@ -135,8 +149,8 @@ function handleLinuxUinputLine(line: string): void {
   }
 }
 
-export function startLinuxPasteHelper(): Promise<boolean> {
-  if (process.platform !== "linux" || !isWaylandSession()) {
+export function startLinuxPasteHelper(force = false): Promise<boolean> {
+  if (process.platform !== "linux" || (!force && !isWaylandSession())) {
     return Promise.resolve(false);
   }
   if (linuxUinputHelper && linuxUinputReady) {
@@ -223,9 +237,10 @@ export function stopLinuxPasteHelper(): void {
 
 async function sendPersistentUinputPaste(
   isTerminal: boolean,
+  force = false,
 ): Promise<boolean> {
   const run = async (): Promise<boolean> => {
-    if (!(await startLinuxPasteHelper())) return false;
+    if (!(await startLinuxPasteHelper(force))) return false;
     const helper = linuxUinputHelper;
     if (!helper?.stdin.writable) return false;
 
@@ -271,6 +286,61 @@ function linuxPasteArgs(isTerminal: boolean): string[] {
   return isTerminal ? ["--terminal"] : [];
 }
 
+function portalTokenPath(): string {
+  return join(app.getPath("userData"), "portal-restore-token");
+}
+
+function readPortalToken(): string | null {
+  try {
+    const token = readFileSync(portalTokenPath(), "utf8").trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+function savePortalToken(token: string): void {
+  try {
+    writeFileSync(portalTokenPath(), token, "utf8");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`Failed to persist portal restore token: ${message}`);
+  }
+}
+
+function clearPortalToken(): void {
+  try {
+    unlinkSync(portalTokenPath());
+  } catch {}
+}
+
+async function pasteLinuxPortal(isTerminal: boolean): Promise<boolean> {
+  const binaryPath = getNativeBinaryPath("linux-fast-paste");
+  if (!binaryPath) return false;
+
+  const args = ["--portal", ...linuxPasteArgs(isTerminal)];
+  const token = readPortalToken();
+  if (token) args.push("--restore-token", token);
+
+  try {
+    const { code, stdout } = await execFileWithOutput(binaryPath, args, 15_000);
+    if (code === 0) {
+      const newToken = stdout.trim().split("\n").pop()?.trim();
+      if (newToken) savePortalToken(newToken);
+      return true;
+    }
+    if (token && (code === 2 || code === 3)) {
+      clearPortalToken();
+    }
+    log.warn(`Portal paste failed (exit ${code})`);
+    return false;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`Portal paste error: ${message}`);
+    return false;
+  }
+}
+
 async function pasteLinux(isTerminal: boolean): Promise<PasteMethod> {
   const binaryPath = getNativeBinaryPath("linux-fast-paste");
   const wayland = isWaylandSession();
@@ -284,17 +354,21 @@ async function pasteLinux(isTerminal: boolean): Promise<PasteMethod> {
       binaryPath,
       linuxPasteArgs(isTerminal),
     );
-    if (exitCode !== 0) {
-      log.warn(
-        `Native paste failed (exit ${exitCode}), falling back to xdotool`,
-      );
-      await pasteLinuxLegacy(false, isTerminal);
-      return "legacy";
+    if (exitCode === 0) {
+      return "native";
     }
-    return "native";
+    log.warn(`Native paste failed (exit ${exitCode}), falling back to xdotool`);
   }
-  await pasteLinuxLegacy(false, isTerminal);
-  return "legacy";
+
+  try {
+    await pasteLinuxLegacy(false, isTerminal);
+    return "legacy";
+  } catch (err) {
+    log.warn("X11 paste backends failed, cross-trying Wayland backends");
+    if (await sendPersistentUinputPaste(isTerminal, true)) return "native";
+    if (await pasteLinuxPortal(isTerminal)) return "native";
+    throw err;
+  }
 }
 
 async function pasteLinuxWayland(isTerminal: boolean): Promise<PasteMethod> {
@@ -302,9 +376,29 @@ async function pasteLinuxWayland(isTerminal: boolean): Promise<PasteMethod> {
     return "native";
   }
 
-  log.warn("Persistent uinput paste failed, falling back to wtype");
-  await pasteLinuxLegacy(true, isTerminal);
-  return "legacy";
+  log.warn("Persistent uinput paste failed, trying RemoteDesktop portal");
+  if (await pasteLinuxPortal(isTerminal)) {
+    return "native";
+  }
+
+  log.warn("Portal paste failed, falling back to wtype");
+  try {
+    await pasteLinuxLegacy(true, isTerminal);
+    return "legacy";
+  } catch (err) {
+    log.warn("Wayland paste backends failed, cross-trying X11 backends");
+    const binary = getNativeBinaryPath("linux-fast-paste");
+    if (binary) {
+      const exitCode = await execFileAsync(binary, linuxPasteArgs(isTerminal));
+      if (exitCode === 0) return "native";
+    }
+    try {
+      await pasteLinuxLegacy(false, isTerminal);
+      return "legacy";
+    } catch {
+      throw err;
+    }
+  }
 }
 
 async function pasteLinuxLegacy(
@@ -325,23 +419,107 @@ async function pasteLinuxLegacy(
   }
 }
 
-// Native binaries inject keystrokes directly at the OS level, so the target
-// app receives them much faster than shell-spawned commands. Settle times
-// are reduced accordingly. If using the legacy fallback, the original higher
-// values are used.
 const PASTE_SETTLE_MS: Record<string, number> = {
-  darwin: 150,
-  win32: 150,
-  linux: 100,
+  darwin: 300,
+  win32: 300,
+  linux: 300,
 };
 
 const PASTE_SETTLE_LEGACY_MS: Record<string, number> = {
   darwin: 500,
   win32: 600,
-  linux: 300,
+  linux: 500,
 };
 
-export async function pasteIntoFocusedApp(
+function pasteSettleMs(method: PasteMethod): number {
+  const override = Number(process.env.FREESTYLE_PASTE_SETTLE_MS);
+  if (Number.isFinite(override) && override >= 0) return override;
+  const table = method === "native" ? PASTE_SETTLE_MS : PASTE_SETTLE_LEGACY_MS;
+  return table[process.platform] ?? 500;
+}
+
+const RESTORABLE_TEXT_FORMATS = new Set([
+  "text/plain",
+  "text/html",
+  "text/rtf",
+]);
+
+type ClipboardSnapshot =
+  | { restorable: false }
+  | {
+      restorable: true;
+      text: string;
+      html?: string;
+      rtf?: string;
+      image?: Electron.NativeImage;
+    };
+
+function snapshotClipboard(): ClipboardSnapshot {
+  try {
+    const formats = clipboard.availableFormats();
+    const unknown = formats.filter(
+      (f) => !RESTORABLE_TEXT_FORMATS.has(f) && !f.startsWith("image/"),
+    );
+    if (unknown.length > 0) {
+      log.debug(
+        `clipboard holds non-restorable formats (${unknown.join(", ")}); leaving transcript on clipboard after paste`,
+      );
+      return { restorable: false };
+    }
+    const hasImage = formats.some((f) => f.startsWith("image/"));
+    return {
+      restorable: true,
+      text: clipboard.readText(),
+      html: formats.includes("text/html") ? clipboard.readHTML() : undefined,
+      rtf: formats.includes("text/rtf") ? clipboard.readRTF() : undefined,
+      image: hasImage ? clipboard.readImage() : undefined,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`Failed to snapshot clipboard: ${message}`);
+    return { restorable: false };
+  }
+}
+
+function restoreClipboard(
+  snapshot: ClipboardSnapshot,
+  transcript: string,
+): void {
+  if (!snapshot.restorable) return;
+  try {
+    if (clipboard.readText() !== transcript) {
+      log.debug("clipboard changed since paste; skipping restore");
+      return;
+    }
+    const data: Electron.Data = { text: snapshot.text };
+    if (snapshot.html !== undefined) data.html = snapshot.html;
+    if (snapshot.rtf !== undefined) data.rtf = snapshot.rtf;
+    if (snapshot.image && !snapshot.image.isEmpty()) {
+      data.image = snapshot.image;
+    }
+    clipboard.write(data);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`Failed to restore clipboard: ${message}`);
+  }
+}
+
+let pasteChain: Promise<void> = Promise.resolve();
+
+export function pasteIntoFocusedApp(
+  text: string,
+  beforePaste?: () => Promise<void> | void,
+): Promise<void> {
+  const run = (): Promise<void> => doPasteIntoFocusedApp(text, beforePaste);
+  const result = pasteChain.then(run, run);
+  pasteChain = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+async function doPasteIntoFocusedApp(
   text: string,
   beforePaste?: () => Promise<void> | void,
 ): Promise<void> {
@@ -350,7 +528,7 @@ export async function pasteIntoFocusedApp(
   log.debug(`pasting ${text?.length ?? 0} chars`);
   if (!text?.trim()) return;
 
-  const prior = clipboard.readText();
+  const prior = snapshotClipboard();
   clipboard.writeText(text);
 
   let pasted = false;
@@ -376,20 +554,12 @@ export async function pasteIntoFocusedApp(
     }
     pasted = true;
 
-    const settleTable =
-      method === "native" ? PASTE_SETTLE_MS : PASTE_SETTLE_LEGACY_MS;
-    const settleMs = settleTable[process.platform] ?? 500;
-    await new Promise((r) => setTimeout(r, settleMs));
+    await new Promise((r) => setTimeout(r, pasteSettleMs(method)));
   } finally {
     // When every paste backend failed, the clipboard is the only copy of the
     // transcript the user still has — leave it there instead of restoring.
     if (pasted) {
-      try {
-        clipboard.writeText(prior);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log.warn(`Failed to restore clipboard: ${message}`);
-      }
+      restoreClipboard(prior, text);
     }
   }
 }

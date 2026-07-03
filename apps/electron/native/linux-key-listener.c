@@ -6,7 +6,6 @@
  * Outputs "KEY_DOWN" and "KEY_UP" to stdout.
  *
  * Requires read access to /dev/input/event* (typically via input group).
- * Falls back to X11 XRecord if /dev/input is not accessible.
  *
  * Compile: gcc -O2 linux-key-listener.c -o linux-key-listener
  *
@@ -24,6 +23,7 @@
 #include <dirent.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/ioctl.h>
 #include <linux/input.h>
 #include <errno.h>
 

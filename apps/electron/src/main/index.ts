@@ -82,6 +82,7 @@ import { isActiveAudioPlaybackMode } from "../shared/audio-playback";
 import { getDefaultHotkey } from "../shared/hotkey-defaults";
 import { SETTINGS_KEYS } from "../shared/settings-keys";
 import { AudioPlaybackController } from "./audio-control/controller";
+import { recoverDuckedVolumeFromCrash } from "./audio-control/volume-ducker";
 import { HotkeyRecorder } from "./hotkey-recorder";
 import { normalizeAccelerator } from "./hotkey-utils";
 import { NativeKeyListener } from "./key-listener";
@@ -980,6 +981,7 @@ function hidePill(): void {
   // state so the next press starts fresh — e.g. after ESC while still
   // holding the dictation key.
   hotkeyPressed = false;
+  clearHotkeyStuckWatchdog();
   // Unregister Escape shortcut when pill is hidden
   try {
     globalShortcut.unregister("Escape");
@@ -1396,6 +1398,7 @@ app.on("second-instance", () => {
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(async () => {
   void startLinuxPasteHelper();
+  void recoverDuckedVolumeFromCrash();
 
   // Set app user model id for windows
   electronApp.setAppUserModelId("com.freestyle.app");
@@ -1995,6 +1998,7 @@ app.whenReady().then(async () => {
   ipcMain.on("hotkey:set-mode", (_event, mode: string) => {
     hotkeyActivationMode = mode === "toggle" ? "toggle" : "hold";
     hotkeyPressed = false;
+    clearHotkeyStuckWatchdog();
     scheduleHotkeyRegistration(currentHotkeyAccel ?? undefined);
   });
 });
@@ -2115,6 +2119,29 @@ function sendHotkeyUp(): void {
   settingsWindow?.webContents.send("hotkey:up");
 }
 
+const HOTKEY_STUCK_TIMEOUT_MS = 5 * 60 * 1000;
+let hotkeyStuckTimer: NodeJS.Timeout | null = null;
+
+function clearHotkeyStuckWatchdog(): void {
+  if (hotkeyStuckTimer) {
+    clearTimeout(hotkeyStuckTimer);
+    hotkeyStuckTimer = null;
+  }
+}
+
+function armHotkeyStuckWatchdog(): void {
+  clearHotkeyStuckWatchdog();
+  hotkeyStuckTimer = setTimeout(() => {
+    hotkeyStuckTimer = null;
+    if (!hotkeyPressed) return;
+    hotkeyLog.warn(
+      "Hold-mode hotkey saw no key-up for 5 minutes; forcing release.",
+    );
+    hotkeyPressed = false;
+    sendHotkeyUp();
+  }, HOTKEY_STUCK_TIMEOUT_MS);
+}
+
 function handleNativeHotkeyDown(): void {
   if (hotkeyActivationMode === "toggle") {
     if (!hotkeyPressed) {
@@ -2129,6 +2156,7 @@ function handleNativeHotkeyDown(): void {
 
   if (!hotkeyPressed) {
     hotkeyPressed = true;
+    armHotkeyStuckWatchdog();
     sendHotkeyDown();
   }
 }
@@ -2138,6 +2166,7 @@ function handleNativeHotkeyUp(): void {
 
   if (hotkeyPressed) {
     hotkeyPressed = false;
+    clearHotkeyStuckWatchdog();
     sendHotkeyUp();
   }
 }
@@ -2174,8 +2203,15 @@ function notifyPasteFailed(): void {
   const shortcut = process.platform === "darwin" ? "Cmd+V" : "Ctrl+V";
   let hint = "";
   if (process.platform === "linux") {
-    const tool = isWaylandSession() ? "wtype" : "xdotool";
-    hint = ` Installing ${tool} may fix this (e.g. sudo apt install ${tool}).`;
+    if (isWaylandSession()) {
+      const desktop = (process.env.XDG_CURRENT_DESKTOP ?? "").toLowerCase();
+      hint = desktop.includes("gnome")
+        ? " If a permission dialog appears on the next paste, allow Freestyle to control input."
+        : " If a permission dialog appears on the next paste, allow it — or install wtype (e.g. sudo apt install wtype).";
+    } else {
+      hint =
+        " Installing xdotool may fix this (e.g. sudo apt install xdotool).";
+    }
   }
   if (Notification.isSupported()) {
     new Notification({
@@ -2239,6 +2275,7 @@ async function registerHotkey(hotkey?: string): Promise<void> {
       keyListener = null;
     }
     hotkeyPressed = false;
+    clearHotkeyStuckWatchdog();
     globalShortcut.unregisterAll();
 
     if (!hotkey) {
@@ -2265,6 +2302,29 @@ async function registerHotkey(hotkey?: string): Promise<void> {
       onReady: () => {
         hotkeyLog.debug(`Native key listener ready for "${accel}"`);
       },
+      onPermanentFailure: () => {
+        if (keyListener !== listener) return;
+        hotkeyLog.error(
+          "Native key listener permanently failed; falling back to Electron globalShortcut (toggle mode).",
+        );
+        listener.stop();
+        keyListener = null;
+        if (hotkeyPressed) {
+          hotkeyPressed = false;
+          clearHotkeyStuckWatchdog();
+          sendHotkeyUp();
+        }
+        const registeredAccel = registerGlobalShortcutToggle(accel);
+        if (registeredAccel) {
+          notifyHotkeyDegraded(accel, nativeError);
+        } else {
+          const errorPayload = {
+            message: `The hotkey listener stopped working and "${accel}" could not be re-registered. Restart Freestyle or pick a different combination in Settings.`,
+          };
+          mainWindow?.webContents.send("hotkey:error", errorPayload);
+          settingsWindow?.webContents.send("hotkey:error", errorPayload);
+        }
+      },
     });
     keyListener = listener;
 
@@ -2279,6 +2339,7 @@ async function registerHotkey(hotkey?: string): Promise<void> {
 
     if (started) {
       accessibilityConfirmed = true;
+      hotkeyDegradedNotified = false;
     } else {
       hotkeyLog.warn(
         "Native key listener unavailable, falling back to Electron globalShortcut (toggle mode).",

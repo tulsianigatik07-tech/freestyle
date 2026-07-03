@@ -83,6 +83,7 @@ const DEFAULT_HOTKEY =
 type LinuxSetup = {
   wayland: boolean;
   inputAccess: boolean;
+  uinputAccess: boolean;
   pasteToolRequired: string;
   pasteTool: string | null;
 };
@@ -983,25 +984,28 @@ function PermissionsStep({
           />
         )}
 
-        {IS_LINUX && linuxSetup && !linuxSetup.pasteTool && (
-          <PermCard
-            icon={ClipboardPaste}
-            title={t("onboarding.permissions.pasteTool.title")}
-            desc={
-              <Trans
-                i18nKey="onboarding.permissions.pasteTool.desc"
-                values={{ tool: linuxSetup.pasteToolRequired }}
-                components={{ code: <code className="text-foreground" /> }}
-              />
-            }
-            granted={false}
-            action={
-              <PermButton onClick={onRecheckLinuxSetup}>
-                {t("common.recheck")}
-              </PermButton>
-            }
-          />
-        )}
+        {IS_LINUX &&
+          linuxSetup &&
+          !linuxSetup.pasteTool &&
+          !(linuxSetup.wayland && linuxSetup.uinputAccess) && (
+            <PermCard
+              icon={ClipboardPaste}
+              title={t("onboarding.permissions.pasteTool.title")}
+              desc={
+                <Trans
+                  i18nKey="onboarding.permissions.pasteTool.desc"
+                  values={{ tool: linuxSetup.pasteToolRequired }}
+                  components={{ code: <code className="text-foreground" /> }}
+                />
+              }
+              granted={false}
+              action={
+                <PermButton onClick={onRecheckLinuxSetup}>
+                  {t("common.recheck")}
+                </PermButton>
+              }
+            />
+          )}
       </div>
 
       <div className="mt-7 flex items-center justify-between gap-3.5">

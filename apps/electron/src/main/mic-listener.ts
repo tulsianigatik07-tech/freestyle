@@ -113,9 +113,9 @@ export class MicListener {
       }
     });
 
-    this.process.on("close", () => {
+    this.process.on("close", (code) => {
       this.process = null;
-      if (!this.destroyed) {
+      if (!this.destroyed && code !== 0) {
         this.scheduleRestart();
       }
     });
