@@ -39,3 +39,44 @@ export function parseCleanupIntensity(
   const result = cleanupIntensitySchema.safeParse(value);
   return result.success ? result.data : DEFAULT_CLEANUP_INTENSITY;
 }
+
+/**
+ * Enterprise network proxy URL. Empty string clears it. Must be an http(s)
+ * (or socks) URL when set — this is what downloads are routed through on
+ * managed corporate networks.
+ */
+export const proxyUrlSettingSchema = z
+  .string()
+  .max(2048)
+  .refine(
+    (value) => {
+      if (value.trim() === "") return true;
+      try {
+        const url = new URL(value.trim());
+        return ["http:", "https:", "socks:", "socks4:", "socks5:"].includes(
+          url.protocol,
+        );
+      } catch {
+        return false;
+      }
+    },
+    {
+      message:
+        "Proxy must be a valid http://, https:// or socks:// URL (or empty to disable)",
+    },
+  );
+
+/** Filesystem path to a custom CA certificate bundle. Empty string clears it. */
+export const caCertPathSettingSchema = z.string().max(4096);
+
+/**
+ * Combined shape for the Network settings form. The renderer drives a
+ * react-hook-form with this schema so its inline validation matches exactly
+ * what the server enforces per-key on `PUT /settings/:key`.
+ */
+export const networkSettingsFormSchema = z.object({
+  proxyUrl: proxyUrlSettingSchema,
+  caCertPath: caCertPathSettingSchema,
+});
+
+export type NetworkSettingsForm = z.infer<typeof networkSettingsFormSchema>;
