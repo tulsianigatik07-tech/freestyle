@@ -1,7 +1,21 @@
 import type { GroqLanguageModelOptions } from "@ai-sdk/groq";
 import { createAppLogger } from "@freestyle-voice/utils";
-import type { CleanupIntensity } from "@freestyle-voice/validations";
-import { parseCleanupIntensity } from "@freestyle-voice/validations";
+import type {
+  CleanupAppAssignment,
+  CleanupEmailTone,
+  CleanupIntensity,
+  CleanupOverallTone,
+  CleanupPersonalTone,
+  CleanupWorkTone,
+} from "@freestyle-voice/validations";
+import {
+  parseCleanupAppAssignments,
+  parseCleanupEmailTone,
+  parseCleanupIntensity,
+  parseCleanupOverallTone,
+  parseCleanupPersonalTone,
+  parseCleanupWorkTone,
+} from "@freestyle-voice/validations";
 import { generateText } from "ai";
 import { getModelCost, isCleanupModelSupported } from "../routes/models.js";
 import { getDb, readSetting } from "./db.js";
@@ -72,6 +86,26 @@ export function getCleanupCustomPrompt(): string | undefined {
   return readSetting("cleanup_custom_prompt");
 }
 
+export function getCleanupPersonalTone(): CleanupPersonalTone {
+  return parseCleanupPersonalTone(readSetting("cleanup_personal_tone"));
+}
+
+export function getCleanupWorkTone(): CleanupWorkTone {
+  return parseCleanupWorkTone(readSetting("cleanup_work_tone"));
+}
+
+export function getCleanupEmailTone(): CleanupEmailTone {
+  return parseCleanupEmailTone(readSetting("cleanup_email_tone"));
+}
+
+export function getCleanupOverallTone(): CleanupOverallTone {
+  return parseCleanupOverallTone(readSetting("cleanup_overall_tone"));
+}
+
+export function getCleanupAppAssignments(): CleanupAppAssignment[] {
+  return parseCleanupAppAssignments(readSetting("cleanup_app_assignments"));
+}
+
 function resolveChatModel(provider: string, modelId: string) {
   if (provider === "groq") {
     return getGroqChatModel(modelId);
@@ -117,6 +151,51 @@ export function prewarmPostProcess(): void {
 }
 
 /**
+ * Final text-rewrite stage that must run on every dictation regardless of
+ * where cleanup happened — local LLM cleanup, Freestyle Cloud's combined
+ * STT+cleanup, or no cleanup at all. Applies the user's dictionary
+ * replacements, then runs the `afterCleanup` plugin hook (each plugin sees the
+ * previous plugin's output).
+ *
+ * These steps used to live inside {@link postProcess}, so any path that
+ * bypassed it (the Freestyle Cloud combined paths) silently dropped them. This
+ * helper decouples them so callers can apply them to already-cleaned text.
+ *
+ * Dictionary replacement is skipped for empty text (nothing to replace), but
+ * the `afterCleanup` hook always fires so plugins observe a consistent
+ * lifecycle. When `rawForCleanedEvent` is provided, a single `Cleaned` event is
+ * emitted whenever the final text differs from it.
+ */
+export async function applyFinalRewrites(
+  text: string,
+  appContext: string | null,
+  rawForCleanedEvent?: string,
+): Promise<string> {
+  let out = text;
+  if (out.trim()) {
+    out = applyDictionaryReplacements(out, getDb());
+  }
+
+  out = (
+    await plugins().run(
+      "afterCleanup",
+      { appContext: parseAppContext(appContext) },
+      { text: out },
+    )
+  ).text;
+
+  if (rawForCleanedEvent !== undefined && out !== rawForCleanedEvent) {
+    void plugins().emit({
+      type: FreestyleEventType.Cleaned,
+      before: rawForCleanedEvent,
+      after: out,
+    });
+  }
+
+  return out;
+}
+
+/**
  * Run LLM cleanup and dictionary replacements on transcribed text.
  * Returns the cleaned text plus metadata for history tracking.
  */
@@ -128,7 +207,6 @@ export async function postProcess(
   const normalizedRawText = sanitizeTranscriptText(rawText);
   const source = options.source ?? "batch";
   const ppStart = Date.now();
-  const db = getDb();
   const parsedContext = parseAppContext(appContext);
   const defaults = getDefaultModels();
   let inputTokens = 0;
@@ -159,6 +237,9 @@ export async function postProcess(
 
   if (llm && isLlmCleanupEnabled()) {
     if (llm.provider === FREESTYLE_CLOUD_PROVIDER_ID) {
+      // Freestyle Cloud assembles its cleanup prompts server-side: it resolves
+      // the destination from appContext + appAssignments and applies the tone
+      // preferences we forward here, mirroring the local/direct-model path.
       const token = getSessionToken();
       if (!token) throw new FreestyleCloudAuthError();
       try {
@@ -167,6 +248,13 @@ export async function postProcess(
           text: normalizedRawText,
           appContext,
           language: options.language,
+          intensity: getCleanupIntensity(),
+          customPrompt: getCleanupCustomPrompt(),
+          personalTone: getCleanupPersonalTone(),
+          workTone: getCleanupWorkTone(),
+          emailTone: getCleanupEmailTone(),
+          overallTone: getCleanupOverallTone(),
+          appAssignments: getCleanupAppAssignments(),
         });
         inputTokens = result.usage?.inputTokens ?? 0;
         outputTokens = result.usage?.outputTokens ?? 0;
@@ -189,27 +277,37 @@ export async function postProcess(
         `Skipping LLM cleanup: unsupported cleanup model ${llm.provider}/${llm.model_id}`,
       );
     } else {
-      const rewriteContext = getRewritePromptContext(appContext, db);
+      const { destination, personalSurface } = getRewritePromptContext(
+        appContext,
+        getCleanupAppAssignments(),
+      );
 
-      // Plugin hook: let plugins override the inferred writing register and
+      // Plugin hook: let plugins override the inferred destination and
       // append extra system-prompt fragments. Runs before prompt assembly so a
-      // register override actually feeds into buildRewritePrompt.
+      // destination override actually feeds into buildRewritePrompt.
       const promptHook = await plugins().run(
         "beforeCleanup",
         {
           text: normalizedRawText,
           appContext: parsedContext,
-          inferredRegister: rewriteContext.registerMode,
+          destination,
         },
-        { system: [] as string[], register: rewriteContext.registerMode },
+        { system: [] as string[], destination },
       );
 
       const { system, prompt } = buildRewritePrompt(normalizedRawText, {
-        contextHint: rewriteContext.contextHint || undefined,
         language: options.language,
-        registerMode: promptHook.register ?? rewriteContext.registerMode,
         intensity: getCleanupIntensity(),
         customPrompt: getCleanupCustomPrompt(),
+        destination: promptHook.destination ?? destination,
+        personalTone: getCleanupPersonalTone(),
+        personalSurface:
+          (promptHook.destination ?? destination) === "personal"
+            ? personalSurface
+            : null,
+        workTone: getCleanupWorkTone(),
+        emailTone: getCleanupEmailTone(),
+        overallTone: getCleanupOverallTone(),
       });
       const pluginSystem =
         promptHook.system.length > 0
@@ -256,27 +354,13 @@ export async function postProcess(
   }
 
   const llmMs = Date.now() - llmStart;
-  cleanedText = applyDictionaryReplacements(cleanedText, db);
-
-  // Plugin hook: final text-rewrite chain, in the same stage as dictionary
-  // replacement. Each plugin sees the previous plugin's output.
-  cleanedText = (
-    await plugins().run(
-      "afterCleanup",
-      { appContext: parsedContext },
-      { text: cleanedText },
-    )
-  ).text;
-
-  // Emit once per dictation whenever any stage (LLM cleanup, dictionary, or a
-  // plugin) changed the text, reporting the full raw -> final transformation.
-  if (cleanedText !== normalizedRawText) {
-    void plugins().emit({
-      type: FreestyleEventType.Cleaned,
-      before: normalizedRawText,
-      after: cleanedText,
-    });
-  }
+  // Dictionary replacement + `afterCleanup` plugin hook + `Cleaned` event. Runs
+  // on the full raw -> final transformation for this dictation.
+  cleanedText = await applyFinalRewrites(
+    cleanedText,
+    appContext,
+    normalizedRawText,
+  );
 
   if (inputTokens > 0 || outputTokens > 0) {
     try {

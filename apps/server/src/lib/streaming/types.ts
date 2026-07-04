@@ -1,10 +1,17 @@
+import type {
+  CleanupAppAssignment,
+  CleanupEmailTone,
+  CleanupOverallTone,
+  CleanupPersonalTone,
+  CleanupWorkTone,
+} from "@freestyle-voice/validations";
 import type { AsrVocabularyBias } from "../vocabulary-bias.js";
 
 export interface StreamCallbacks {
   onReady: (model: string) => void;
   onPartial: (text: string) => void;
   onFinal: (text: string) => void;
-  onError: (message: string) => void;
+  onError: (message: string, code?: string) => void;
   onClose: () => void;
 }
 
@@ -17,6 +24,10 @@ export interface StreamSession {
    * Audio may be sent before this completes; providers should buffer it.
    */
   waitUntilReady?(): Promise<void>;
+  /** Update the app context forwarded to the upstream provider (if supported). */
+  setContext?(context: string | null): void;
+  /** Set the audio duration (ms) to include with the next commit (if supported). */
+  setAudioDurationMs?(ms: number): void;
   commit(): void;
   cancel(): void;
   close(): void;
@@ -42,6 +53,30 @@ export interface TranscribeResult {
   durationInSeconds?: number;
 }
 
+/**
+ * Cleanup preferences forwarded to providers that post-process server-side
+ * (currently only freestyle-cloud). Local/BYOK providers ignore these — the
+ * desktop runs its own `postProcess()` for those.
+ */
+export interface StreamCleanupPreferences {
+  /** When true, the provider should return the raw transcript with no LLM cleanup. */
+  skipPostProcess: boolean;
+  /** Cleanup intensity preset (only meaningful when `skipPostProcess` is false). */
+  intensity?: string;
+  /** Custom cleanup prompt (only used when intensity is "custom"). */
+  customPrompt?: string;
+  /** Preferred tone when the destination reads like a personal message. */
+  personalTone?: CleanupPersonalTone;
+  /** Preferred tone when the destination reads like work correspondence. */
+  workTone?: CleanupWorkTone;
+  /** Preferred tone when the destination looks like email. */
+  emailTone?: CleanupEmailTone;
+  /** Preferred tone for destinations that do not match a specific category. */
+  overallTone?: CleanupOverallTone;
+  /** Per-app/site destination overrides that steer server-side tone routing. */
+  appAssignments?: CleanupAppAssignment[];
+}
+
 export interface StreamingSessionOptions {
   apiKey: string;
   model: string;
@@ -52,6 +87,11 @@ export interface StreamingSessionOptions {
   language?: string;
   /** ASR-only vocabulary bias for the first recognition pass. */
   bias?: AsrVocabularyBias | null;
+  /**
+   * Cleanup preferences for server-side post-processing providers. Mirrors the
+   * batch `/v2/transcribe` payload so streaming and batch behave identically.
+   */
+  cleanup?: StreamCleanupPreferences;
   callbacks: StreamCallbacks;
 }
 

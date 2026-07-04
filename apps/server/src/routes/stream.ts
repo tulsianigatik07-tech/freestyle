@@ -2,7 +2,11 @@ import { createAppLogger } from "@freestyle-voice/utils";
 import { upgradeWebSocket } from "@hono/node-server";
 import { Hono } from "hono";
 import { sanitizeTranscriptText } from "../lib/editor/model-hints.js";
-import { FreestyleCloudAuthError } from "../lib/freestyle-cloud.js";
+import {
+  FREESTYLE_CLOUD_PROVIDER_ID,
+  FreestyleCloudAuthError,
+  FreestyleCloudUsageError,
+} from "../lib/freestyle-cloud.js";
 import { saveProcessedHistory, saveRawHistory } from "../lib/history-store.js";
 import { getLanguageSetting } from "../lib/language.js";
 import {
@@ -10,7 +14,19 @@ import {
   parseAppContext,
   plugins,
 } from "../lib/plugins/index.js";
-import { postProcess, prewarmPostProcess } from "../lib/post-process.js";
+import {
+  applyFinalRewrites,
+  getCleanupAppAssignments,
+  getCleanupCustomPrompt,
+  getCleanupEmailTone,
+  getCleanupIntensity,
+  getCleanupOverallTone,
+  getCleanupPersonalTone,
+  getCleanupWorkTone,
+  isLlmCleanupEnabled,
+  postProcess,
+  prewarmPostProcess,
+} from "../lib/post-process.js";
 import { capture, captureException } from "../lib/posthog.js";
 import { getDefaultModels } from "../lib/providers.js";
 import { invalidateSession } from "../lib/sessions.js";
@@ -78,6 +94,26 @@ const stream = new Hono().get(
         voice.model_id,
         true,
       );
+      // Freestyle Cloud post-processes server-side, so its cleanup preferences
+      // are part of the session transport config: if they change mid-session we
+      // must reconnect (a kept-warm upstream captured the old prefs at connect
+      // time and only re-sends them via `reset()`). Folding them into the
+      // compare key makes `sameConfig` false on any change, forcing a fresh
+      // connection. Non-cloud providers don't send cleanup upstream, so this
+      // stays null for them.
+      const cleanupFingerprint =
+        voice.provider === FREESTYLE_CLOUD_PROVIDER_ID
+          ? JSON.stringify([
+              isLlmCleanupEnabled(),
+              getCleanupIntensity(),
+              getCleanupCustomPrompt(),
+              getCleanupPersonalTone(),
+              getCleanupWorkTone(),
+              getCleanupEmailTone(),
+              getCleanupOverallTone(),
+              getCleanupAppAssignments(),
+            ])
+          : null;
       return {
         voice,
         language,
@@ -87,6 +123,7 @@ const stream = new Hono().get(
           voice.model_id,
           language ?? null,
           bias,
+          cleanupFingerprint,
         ]),
       };
     }
@@ -231,6 +268,24 @@ const stream = new Hono().get(
 
       upstreamConfigKey = config.key;
 
+      // Freestyle Cloud post-processes server-side, so forward the desktop's
+      // cleanup settings in the streaming payload — matching the batch
+      // `/v2/transcribe` path. When cleanup is disabled, `skipPostProcess`
+      // tells the cloud to return the raw transcript (and bill accordingly).
+      const cleanup =
+        voice.provider === FREESTYLE_CLOUD_PROVIDER_ID
+          ? {
+              skipPostProcess: !isLlmCleanupEnabled(),
+              intensity: getCleanupIntensity(),
+              customPrompt: getCleanupCustomPrompt(),
+              personalTone: getCleanupPersonalTone(),
+              workTone: getCleanupWorkTone(),
+              emailTone: getCleanupEmailTone(),
+              overallTone: getCleanupOverallTone(),
+              appAssignments: getCleanupAppAssignments(),
+            }
+          : undefined;
+
       const token = ++readyToken;
       const session = openStreamingSession({
         providerId: voice.provider,
@@ -238,6 +293,7 @@ const stream = new Hono().get(
         model: voice.model_id,
         language: config.language,
         bias: config.bias,
+        cleanup,
         callbacks: {
           onReady: (readyModel) => {
             if (upstream !== session) return;
@@ -257,6 +313,104 @@ const stream = new Hono().get(
             const durationMs = Date.now() - sessionStartTime;
             if (!shouldKeepStreamingUpstreamAlive(voice.provider)) {
               closeUpstreamSession(session);
+            }
+
+            // Freestyle Cloud streaming. The cloud DO returns cleaned text when
+            // post-processing is on, or the raw transcript when it is off
+            // (`skipPostProcess = !isLlmCleanupEnabled()` was sent on connect).
+            if (voice.provider === FREESTYLE_CLOUD_PROVIDER_ID) {
+              const cloudHandledPostProcess = isLlmCleanupEnabled();
+              const cloudText = rawText?.trim() || "";
+              let text = cloudText;
+
+              if (!cloudHandledPostProcess) {
+                // Post-processing off: cloudText IS the raw transcript, so this
+                // is the only cloud case where we have a real raw transcript.
+                // Emit Transcribed and run afterTranscribe (voice-commands,
+                // etc.), mirroring the local path.
+                void plugins().emit({
+                  type: FreestyleEventType.Transcribed,
+                  text,
+                });
+                text = (
+                  await plugins().run(
+                    "afterTranscribe",
+                    {
+                      providerId: voiceDefaults!.provider,
+                      modelId: voiceDefaults!.model_id,
+                      appContext: parseAppContext(appContext),
+                    },
+                    { text },
+                  )
+                ).text;
+                // A plugin may consume/suppress the transcript (empty result).
+                if (!text.trim()) {
+                  if (!closed) {
+                    ws.send(JSON.stringify({ type: "final", text: "" }));
+                  }
+                  return;
+                }
+              }
+              // When the cloud handled post-processing there is no separable raw
+              // transcript, so we neither emit Transcribed nor run
+              // afterTranscribe. The dictionary + afterCleanup hook are
+              // local-only, so still apply them here in both cases.
+
+              const finalText = await applyFinalRewrites(
+                text,
+                appContext,
+                cloudText,
+              );
+
+              const llmProvider = cloudHandledPostProcess
+                ? FREESTYLE_CLOUD_PROVIDER_ID
+                : null;
+              const llmModel = cloudHandledPostProcess
+                ? "freestyle-cloud/post-process"
+                : null;
+
+              const sttAfterCommitMs =
+                commitTime > 0 ? Date.now() - commitTime : durationMs;
+              if (LOG_PIPELINE_LATENCY) {
+                log.info(
+                  `[pipeline] cloud_stream stt_after_commit=${sttAfterCommitMs}ms session=${durationMs}ms | ${voice.provider}/${voiceDefaults!.model_id}`,
+                );
+              }
+              capture("streaming transcription completed", {
+                provider: voiceDefaults!.provider,
+                provider_category: voiceProviderCategory(
+                  voiceDefaults!.provider,
+                ),
+                model: voiceDefaults!.model_id,
+                duration_ms: durationMs,
+                audio_duration_ms: audioDurationMs,
+                llm_provider: llmProvider,
+                llm_model: llmModel,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0,
+              });
+              if (!closed) {
+                ws.send(JSON.stringify({ type: "final", text: finalText }));
+              }
+              try {
+                saveProcessedHistory({
+                  rawText: cloudText,
+                  cleanedText: finalText !== cloudText ? finalText : null,
+                  voiceProvider: voiceDefaults!.provider,
+                  voiceModel: voiceDefaults!.model_id,
+                  llmProvider,
+                  llmModel,
+                  durationMs,
+                  audioDurationMs,
+                  inputTokens: 0,
+                  outputTokens: 0,
+                  costUsd: 0,
+                });
+              } catch (err) {
+                log.error(`Failed to save history: ${err}`);
+              }
+              return;
             }
 
             // Plugin hook: rewrite the raw transcript before cleanup, matching
@@ -364,6 +518,18 @@ const stream = new Hono().get(
                   }
                   return;
                 }
+                if (err instanceof FreestyleCloudUsageError) {
+                  if (!closed) {
+                    ws.send(
+                      JSON.stringify({
+                        type: "error",
+                        code: "usage_exceeded",
+                        message: "Freestyle Cloud usage limit reached",
+                      }),
+                    );
+                  }
+                  return;
+                }
                 captureException(err);
                 if (!closed) {
                   ws.send(JSON.stringify({ type: "final", text: rawText }));
@@ -379,7 +545,7 @@ const stream = new Hono().get(
                 } catch {}
               });
           },
-          onError: (message) => {
+          onError: (message, code) => {
             if (upstream !== session) return;
             sessionTransportUnavailable = true;
             ws.send(
@@ -390,7 +556,13 @@ const stream = new Hono().get(
                 model: modelShort,
               }),
             );
-            ws.send(JSON.stringify({ type: "error", message }));
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                ...(code ? { code } : {}),
+                message,
+              }),
+            );
             upstream = null;
             try {
               session.close();
@@ -500,6 +672,7 @@ const stream = new Hono().get(
         switch (msg.type) {
           case "context":
             appContext = msg.context ?? null;
+            upstream?.setContext?.(appContext);
             break;
           case "start": {
             sessionStartTime = Date.now();
@@ -555,9 +728,11 @@ const stream = new Hono().get(
             commitTime = Date.now();
             if (msg.audioDurationMs && msg.audioDurationMs > 0) {
               audioDurationMs = msg.audioDurationMs;
+              upstream?.setAudioDurationMs?.(audioDurationMs);
             }
             if (msg.context !== undefined) {
               appContext = msg.context;
+              upstream?.setContext?.(appContext);
             }
             if (
               upstream &&

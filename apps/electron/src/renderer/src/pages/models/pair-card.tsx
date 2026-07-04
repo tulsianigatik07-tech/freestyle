@@ -7,8 +7,9 @@ import type { ConfiguredModel } from "./types";
 import { displayName } from "./utils";
 
 // ---------------------------------------------------------------------------
-// PairCard — the "current pair" hero: Voice (required) + LLM cleanup (optional)
-// Side-by-side layout; each "Change" opens the shared model modal.
+// PairCard — the current model pair: Voice (required) + cleanup model.
+// Side-by-side layout; each "Change" opens the shared model modal. The cleanup
+// side owns the on/off switch for post-processing (llm_cleanup).
 // ---------------------------------------------------------------------------
 
 export function PairCard({
@@ -19,7 +20,6 @@ export function PairCard({
   onChangeVoice,
   onChangeLlm,
   onConfigureWarming,
-  cleanupDisabled,
 }: {
   voice: ConfiguredModel | undefined;
   llm: ConfiguredModel | undefined;
@@ -29,8 +29,6 @@ export function PairCard({
   onChangeLlm: () => void;
   /** When set, shows a "Configure model warming" link by the voice button. */
   onConfigureWarming?: () => void;
-  /** True when cleanup is part of a combined transcription request. */
-  cleanupDisabled?: boolean;
 }): React.JSX.Element {
   return (
     <section className="border-border bg-card grid grid-cols-1 gap-6 rounded-[14px] border p-6 min-[820px]:grid-cols-2">
@@ -66,11 +64,6 @@ export function PairCard({
           onToggle={onToggleCleanup}
           onChange={onChangeLlm}
           dimmed={!llmCleanup}
-          note={
-            cleanupDisabled
-              ? "Combined with transcription in one Freestyle Transcribe request"
-              : undefined
-          }
         />
       </div>
     </section>
