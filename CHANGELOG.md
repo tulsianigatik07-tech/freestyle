@@ -1,4 +1,11 @@
 # Changelog
+## 0.4.1
+
+### Bug Fixes 🐛
+
+- (server) Retry stale-socket resets on Freestyle Cloud calls by @MathurAditya724 in [#392](https://github.com/freestyle-voice/freestyle/pull/392)
+- Handle rejected initial update check to avoid false crash reports by @MathurAditya724 in [#393](https://github.com/freestyle-voice/freestyle/pull/393)
+
 ## 0.4.0
 
 ### New Features ✨
