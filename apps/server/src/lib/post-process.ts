@@ -9,6 +9,7 @@ import type {
   CleanupWorkTone,
 } from "@freestyle-voice/validations";
 import {
+  areAllCleanupTonesOff,
   parseCleanupAppAssignments,
   parseCleanupEmailTone,
   parseCleanupIntensity,
@@ -107,6 +108,43 @@ export function getCleanupAppAssignments(): CleanupAppAssignment[] {
   return parseCleanupAppAssignments(readSetting("cleanup_app_assignments"));
 }
 
+export interface EffectiveCleanupTones {
+  intensity: CleanupIntensity;
+  customPrompt: string | undefined;
+  personalTone: CleanupPersonalTone;
+  workTone: CleanupWorkTone;
+  emailTone: CleanupEmailTone;
+  overallTone: CleanupOverallTone;
+}
+
+/**
+ * Resolve the cleanup strength + per-sector tones applied to a dictation.
+ * Shared by every cleanup path (batch/local, Freestyle Cloud post-process,
+ * and Freestyle Cloud streaming).
+ */
+export function getEffectiveCleanupTones(): EffectiveCleanupTones {
+  return {
+    intensity: getCleanupIntensity(),
+    customPrompt: getCleanupCustomPrompt(),
+    personalTone: getCleanupPersonalTone(),
+    workTone: getCleanupWorkTone(),
+    emailTone: getCleanupEmailTone(),
+    overallTone: getCleanupOverallTone(),
+  };
+}
+
+/** App context is only needed when cleanup is on and at least one sector tone is active. */
+export function needsAppContextForCleanup(): boolean {
+  if (!isLlmCleanupEnabled()) return false;
+  return !areAllCleanupTonesOff(getEffectiveCleanupTones());
+}
+
+export function resolveAppContextForCleanup(
+  appContext: string | null,
+): string | null {
+  return needsAppContextForCleanup() ? appContext : null;
+}
+
 function resolveChatModel(provider: string, modelId: string) {
   if (provider === "groq") {
     return getGroqChatModel(modelId);
@@ -172,6 +210,7 @@ export async function applyFinalRewrites(
   appContext: string | null,
   rawForCleanedEvent?: string,
 ): Promise<string> {
+  const effectiveAppContext = resolveAppContextForCleanup(appContext);
   let out = text;
   if (out.trim()) {
     out = applyDictionaryReplacements(out, getDb());
@@ -180,7 +219,7 @@ export async function applyFinalRewrites(
   out = (
     await plugins().run(
       "afterCleanup",
-      { appContext: parseAppContext(appContext) },
+      { appContext: parseAppContext(effectiveAppContext) },
       { text: out },
     )
   ).text;
@@ -208,7 +247,8 @@ export async function postProcess(
   const normalizedRawText = sanitizeTranscriptText(rawText);
   const source = options.source ?? "batch";
   const ppStart = Date.now();
-  const parsedContext = parseAppContext(appContext);
+  const effectiveAppContext = resolveAppContextForCleanup(appContext);
+  const parsedContext = parseAppContext(effectiveAppContext);
   const defaults = getDefaultModels();
   let inputTokens = 0;
   let outputTokens = 0;
@@ -237,6 +277,16 @@ export async function postProcess(
   let handoffMs = 0;
 
   if (llm && isLlmCleanupEnabled()) {
+    // Resolved cleanup config for both Freestyle Cloud and local-model paths.
+    const {
+      intensity,
+      customPrompt,
+      personalTone,
+      workTone,
+      emailTone,
+      overallTone,
+    } = getEffectiveCleanupTones();
+
     if (llm.provider === FREESTYLE_CLOUD_PROVIDER_ID) {
       // Freestyle Cloud assembles its cleanup prompts server-side: it resolves
       // the destination from appContext + appAssignments and applies the tone
@@ -247,14 +297,14 @@ export async function postProcess(
         const result = await postProcessWithFreestyleCloud({
           token,
           text: normalizedRawText,
-          appContext,
+          appContext: effectiveAppContext,
           language: options.language,
-          intensity: getCleanupIntensity(),
-          customPrompt: getCleanupCustomPrompt(),
-          personalTone: getCleanupPersonalTone(),
-          workTone: getCleanupWorkTone(),
-          emailTone: getCleanupEmailTone(),
-          overallTone: getCleanupOverallTone(),
+          intensity,
+          customPrompt,
+          personalTone,
+          workTone,
+          emailTone,
+          overallTone,
           appAssignments: getCleanupAppAssignments(),
         });
         inputTokens = result.usage?.inputTokens ?? 0;
@@ -280,7 +330,7 @@ export async function postProcess(
       );
     } else {
       const { destination, personalSurface } = getRewritePromptContext(
-        appContext,
+        effectiveAppContext,
         getCleanupAppAssignments(),
       );
 
@@ -299,17 +349,17 @@ export async function postProcess(
 
       const { system, prompt } = buildRewritePrompt(normalizedRawText, {
         language: options.language,
-        intensity: getCleanupIntensity(),
-        customPrompt: getCleanupCustomPrompt(),
+        intensity,
+        customPrompt,
         destination: promptHook.destination ?? destination,
-        personalTone: getCleanupPersonalTone(),
+        personalTone,
         personalSurface:
           (promptHook.destination ?? destination) === "personal"
             ? personalSurface
             : null,
-        workTone: getCleanupWorkTone(),
-        emailTone: getCleanupEmailTone(),
-        overallTone: getCleanupOverallTone(),
+        workTone,
+        emailTone,
+        overallTone,
       });
       const pluginSystem =
         promptHook.system.length > 0

@@ -129,6 +129,12 @@ const PERSONAL_OPTIONS: ToneCardOption<CleanupPersonalTone>[] = [
     descKey: "tone.personal.cards.very_casual.desc",
     sampleKey: "tone.personal.cards.very_casual.sample",
   },
+  {
+    value: "off",
+    titleKey: "tone.personal.cards.off.title",
+    descKey: "tone.personal.cards.off.desc",
+    sampleKey: "tone.personal.cards.off.sample",
+  },
 ];
 
 const WORK_OPTIONS: ToneCardOption<CleanupWorkTone>[] = [
@@ -149,6 +155,12 @@ const WORK_OPTIONS: ToneCardOption<CleanupWorkTone>[] = [
     titleKey: "tone.work.cards.formal.title",
     descKey: "tone.work.cards.formal.desc",
     sampleKey: "tone.work.cards.formal.sample",
+  },
+  {
+    value: "off",
+    titleKey: "tone.work.cards.off.title",
+    descKey: "tone.work.cards.off.desc",
+    sampleKey: "tone.work.cards.off.sample",
   },
 ];
 
@@ -171,6 +183,12 @@ const EMAIL_OPTIONS: ToneCardOption<CleanupEmailTone>[] = [
     descKey: "tone.email.cards.formal.desc",
     sampleKey: "tone.email.cards.formal.sample",
   },
+  {
+    value: "off",
+    titleKey: "tone.email.cards.off.title",
+    descKey: "tone.email.cards.off.desc",
+    sampleKey: "tone.email.cards.off.sample",
+  },
 ];
 
 const OVERALL_OPTIONS: ToneCardOption<CleanupOverallTone>[] = [
@@ -192,6 +210,12 @@ const OVERALL_OPTIONS: ToneCardOption<CleanupOverallTone>[] = [
     descKey: "tone.everythingElse.cards.professional.desc",
     sampleKey: "tone.everythingElse.cards.professional.sample",
   },
+  {
+    value: "off",
+    titleKey: "tone.everythingElse.cards.off.title",
+    descKey: "tone.everythingElse.cards.off.desc",
+    sampleKey: "tone.everythingElse.cards.off.sample",
+  },
 ];
 
 export default function TonePage(): React.JSX.Element {
@@ -200,7 +224,7 @@ export default function TonePage(): React.JSX.Element {
   const [loading, setLoading] = useState(true);
   const [llmCleanup, setLlmCleanup] = useState(false);
   const [cleanupIntensity, setCleanupIntensity] =
-    useState<CleanupIntensity>("low");
+    useState<CleanupIntensity>("medium");
   const [cleanupCustomPrompt, setCleanupCustomPrompt] = useState("");
   const [savedCleanupCustomPrompt, setSavedCleanupCustomPrompt] = useState("");
   const [savingCustomPrompt, setSavingCustomPrompt] = useState(false);
@@ -237,7 +261,9 @@ export default function TonePage(): React.JSX.Element {
 
       if (settingsRes.ok) {
         const settings = await settingsRes.json();
-        setLlmCleanup(settings[SETTINGS_KEYS.llmCleanup] === "true");
+        const cleanupOn = settings[SETTINGS_KEYS.llmCleanup] === "true";
+        setLlmCleanup(cleanupOn);
+
         setCleanupIntensity(
           parseCleanupIntensity(settings[SETTINGS_KEYS.cleanupIntensity]),
         );
@@ -473,7 +499,11 @@ export default function TonePage(): React.JSX.Element {
   return (
     <PageShell>
       <div className="mx-auto w-full max-w-[1060px]">
-        <PageHeader title={t("tone.title")} subtitle={t("tone.subtitle")} />
+        <PageHeader
+          title={t("tone.title")}
+          subtitle={t("tone.subtitle")}
+          badge={t("tone.beta")}
+        />
 
         {!llmCleanup ? (
           <CleanupDisabledBanner
@@ -520,7 +550,6 @@ export default function TonePage(): React.JSX.Element {
               onSaveCustomPrompt={() => void saveCleanupCustomPrompt()}
               onResetToPreset={resetToPresetMode}
               savingCustomPrompt={savingCustomPrompt}
-              disabled={!llmCleanup}
             />
           </TabsContent>
 
@@ -539,7 +568,6 @@ export default function TonePage(): React.JSX.Element {
               allAssignments={assignments}
               onAddAssignment={addAssignment}
               onRemoveAssignment={removeAssignment}
-              disabled={!llmCleanup}
             />
           </TabsContent>
 
@@ -556,7 +584,6 @@ export default function TonePage(): React.JSX.Element {
               allAssignments={assignments}
               onAddAssignment={addAssignment}
               onRemoveAssignment={removeAssignment}
-              disabled={!llmCleanup}
             />
           </TabsContent>
 
@@ -573,7 +600,6 @@ export default function TonePage(): React.JSX.Element {
               allAssignments={assignments}
               onAddAssignment={addAssignment}
               onRemoveAssignment={removeAssignment}
-              disabled={!llmCleanup}
             />
           </TabsContent>
 
@@ -593,7 +619,6 @@ export default function TonePage(): React.JSX.Element {
               allAssignments={assignments}
               onAddAssignment={addAssignment}
               onRemoveAssignment={removeAssignment}
-              disabled={!llmCleanup}
             />
           </TabsContent>
         </Tabs>
@@ -1124,7 +1149,11 @@ function SubsetTonePanel<T extends string>({
             <Eyebrow text={t("tone.cleanup.preview.resultLabel")} accent />
             <span className="border-border/70 h-px flex-1 border-t" />
           </div>
-          {renderPreview(t(activeOption.sampleKey), false)}
+          {activeOption.value === "off" ? (
+            <NotePreview sample={t(activeOption.sampleKey)} selected={false} />
+          ) : (
+            renderPreview(t(activeOption.sampleKey), false)
+          )}
         </div>
       </div>
     </div>

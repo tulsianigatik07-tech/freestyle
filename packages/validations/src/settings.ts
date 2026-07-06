@@ -16,7 +16,8 @@ export const cleanupIntensitySchema = z.enum([
 
 export type CleanupIntensity = z.infer<typeof cleanupIntensitySchema>;
 
-export const DEFAULT_CLEANUP_INTENSITY: CleanupIntensity = "low";
+// Default cleanup strength for new users and missing settings.
+export const DEFAULT_CLEANUP_INTENSITY: CleanupIntensity = "medium";
 
 /**
  * Upper bound on a user-authored custom cleanup prompt. Comfortably above the

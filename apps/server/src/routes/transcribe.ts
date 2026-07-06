@@ -20,13 +20,9 @@ import {
 import {
   applyFinalRewrites,
   getCleanupAppAssignments,
-  getCleanupCustomPrompt,
-  getCleanupEmailTone,
-  getCleanupIntensity,
-  getCleanupOverallTone,
-  getCleanupPersonalTone,
-  getCleanupWorkTone,
+  getEffectiveCleanupTones,
   postProcess,
+  resolveAppContextForCleanup,
 } from "../lib/post-process.js";
 import { capture, captureException } from "../lib/posthog.js";
 import { getDefaultModels } from "../lib/providers.js";
@@ -88,7 +84,9 @@ const transcribeRoute = new Hono().post("/", async (c) => {
     )} contentType=${contentType.slice(0, 40)}`,
   );
 
-  const appContext = decodeAppContext(c.req.header("x-app-context"));
+  const appContext = resolveAppContextForCleanup(
+    decodeAppContext(c.req.header("x-app-context")),
+  );
 
   let audioDurationMs = 0;
   if (audioData.length > 44) {
@@ -153,12 +151,7 @@ const transcribeRoute = new Hono().post("/", async (c) => {
         language,
         appContext,
         mode: "combined",
-        intensity: getCleanupIntensity(),
-        customPrompt: getCleanupCustomPrompt(),
-        personalTone: getCleanupPersonalTone(),
-        workTone: getCleanupWorkTone(),
-        emailTone: getCleanupEmailTone(),
-        overallTone: getCleanupOverallTone(),
+        ...getEffectiveCleanupTones(),
         appAssignments: getCleanupAppAssignments(),
       });
       rawText = sanitizeTranscriptText(result.raw ?? "");

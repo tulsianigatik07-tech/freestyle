@@ -45,6 +45,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { electronApp, is, optimizer } from "@electron-toolkit/utils";
 import {
+  type AppType,
   activateManagedMlxRuntimeForAppVersion,
   autoStartWhisperServer,
   captureException,
@@ -56,6 +57,7 @@ import {
   startServer as startFreestyleServer,
   stopMlxServer,
   stopWhisperServer,
+  writeSetting,
 } from "@freestyle-voice/server";
 import { createAppLogger, enableFileLogging } from "@freestyle-voice/utils";
 import {
@@ -76,6 +78,7 @@ import {
   Tray,
 } from "electron";
 import { autoUpdater } from "electron-updater";
+import { hc } from "hono/client";
 import icon from "../../resources/icon.png?asset";
 import trayIconPath from "../../resources/tray/logoTemplate.png?asset";
 import { isActiveAudioPlaybackMode } from "../shared/audio-playback";
@@ -251,6 +254,8 @@ function initPluginsForServer(): void {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let httpServer: any = null;
+/** True when this process reuses another Freestyle server on the default port. */
+let reusingExternalServer = false;
 let serverPort = DEFAULT_PORT;
 let mainWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
@@ -1253,6 +1258,71 @@ function resetOnboarding(): void {
   showSettingsWindow("/onboarding");
 }
 
+const SERVER_SETTING_TIMEOUT_MS = 5000;
+
+async function putServerSetting(key: string, value: string): Promise<boolean> {
+  try {
+    const res = await hc<AppType>(getServerBaseUrl()).api.settings[":key"].$put(
+      { param: { key }, json: { value } },
+      { init: { signal: AbortSignal.timeout(SERVER_SETTING_TIMEOUT_MS) } },
+    );
+    return res.ok;
+  } catch (err) {
+    log.warn(`Failed to save setting "${key}":`, err);
+    return false;
+  }
+}
+
+// Dev-only: reset every sector tone to off and cleanup intensity to medium.
+async function resetToneConfiguration(): Promise<void> {
+  const resets: ReadonlyArray<readonly [string, string]> = [
+    [SETTINGS_KEYS.cleanupPersonalTone, "off"],
+    [SETTINGS_KEYS.cleanupWorkTone, "off"],
+    [SETTINGS_KEYS.cleanupEmailTone, "off"],
+    [SETTINGS_KEYS.cleanupOverallTone, "off"],
+    [SETTINGS_KEYS.cleanupIntensity, "medium"],
+  ];
+
+  if (reusingExternalServer) {
+    const results = await Promise.all(
+      resets.map(([key, value]) => putServerSetting(key, value)),
+    );
+    if (results.some((ok) => !ok)) {
+      log.warn(
+        "Reset tone configuration failed: one or more settings rejected",
+      );
+    }
+  } else {
+    for (const [key, value] of resets) {
+      try {
+        writeSetting(key, value);
+      } catch (err) {
+        log.warn(`Reset tone configuration failed for "${key}":`, err);
+      }
+    }
+  }
+
+  const tonePath = "/settings/tone";
+  if (!settingsWindow) {
+    createSettingsWindow(tonePath);
+    return;
+  }
+
+  const url = getDashboardURL(tonePath);
+  const current = settingsWindow.webContents.getURL();
+  if (current.includes(tonePath)) {
+    settingsWindow.webContents.reloadIgnoringCache();
+  } else {
+    void settingsWindow.loadURL(url);
+  }
+  if (process.platform === "darwin") {
+    app.dock?.show();
+    app.focus({ steal: true });
+  }
+  settingsWindow.show();
+  settingsWindow.focus();
+}
+
 async function factoryReset(): Promise<void> {
   const { response } = await dialog.showMessageBox({
     type: "warning",
@@ -1467,6 +1537,12 @@ function buildTrayContextMenu(): Menu {
             click: resetOnboarding,
           },
           {
+            label: "Reset Tone Configuration",
+            click: () => {
+              void resetToneConfiguration();
+            },
+          },
+          {
             label: "Hard Reset",
             click: () => {
               void factoryReset();
@@ -1532,6 +1608,12 @@ function rebuildMenus(): void {
                     {
                       label: "Reset Onboarding",
                       click: resetOnboarding,
+                    },
+                    {
+                      label: "Reset Tone Configuration",
+                      click: () => {
+                        void resetToneConfiguration();
+                      },
                     },
                     {
                       label: "Hard Reset",
@@ -1907,6 +1989,7 @@ app.whenReady().then(async () => {
   } catch {}
 
   if (existingServer) {
+    reusingExternalServer = true;
     serverPort = DEFAULT_PORT;
     log.info(
       `Reusing existing Freestyle server on http://localhost:${DEFAULT_PORT}`,
