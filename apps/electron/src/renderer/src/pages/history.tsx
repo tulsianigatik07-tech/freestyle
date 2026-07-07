@@ -2,12 +2,6 @@ import { Badge } from "@renderer/components/ui/badge";
 import { Button } from "@renderer/components/ui/button";
 import { Input } from "@renderer/components/ui/input";
 import { Label } from "@renderer/components/ui/label";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@renderer/components/ui/sheet";
 import { getClient } from "@renderer/lib/api";
 import { SEARCH_SHORTCUT_LABEL } from "@renderer/lib/platform";
 import { cn, ON_DEVICE_PHRASE } from "@renderer/lib/utils";
@@ -110,6 +104,7 @@ function getDateGroup(iso: string): string {
 }
 
 const PAGE_SIZE = 20;
+const DEV_HISTORY_SEED_ENABLED = import.meta.env.DEV;
 
 export default function HistoryPage(): React.JSX.Element {
   const { t } = useTranslation();
@@ -193,9 +188,49 @@ export default function HistoryPage(): React.JSX.Element {
     },
   });
 
-  const entries = historyData?.items ?? [];
-  const total = historyData?.total ?? 0;
-  const stats = historyData?.stats ?? null;
+  const apiEntries = historyData?.items ?? [];
+  const devSeedEntry = useMemo<HistoryEntry | null>(() => {
+    if (!DEV_HISTORY_SEED_ENABLED) return null;
+    if (search && !"inline filter panel visual test".includes(search)) {
+      return null;
+    }
+    if (startDate && todayStr < startDate) return null;
+    if (endDate && todayStr > endDate) return null;
+
+    return {
+      id: -419,
+      raw_text: "Inline filter panel visual test.",
+      cleaned_text:
+        "Inline filter panel visual test entry for reviewing the History layout.",
+      voice_provider: "dev-seed",
+      voice_model: "dev-seed/local",
+      llm_provider: "dev-seed",
+      llm_model: "dev-seed/cleanup",
+      duration_ms: 640,
+      audio_duration_ms: 3200,
+      input_tokens: 18,
+      output_tokens: 12,
+      cost_usd: 0,
+      created_at: new Date().toISOString().replace("T", " ").slice(0, 19),
+    };
+  }, [endDate, search, startDate, todayStr]);
+  const hasDevSeedEntry = apiEntries.length === 0 && devSeedEntry !== null;
+  const entries = hasDevSeedEntry ? [devSeedEntry] : apiEntries;
+  const total = hasDevSeedEntry ? 1 : (historyData?.total ?? 0);
+  const stats = hasDevSeedEntry
+    ? {
+        total_sessions: 1,
+        total_duration_ms: 640,
+        total_input_tokens: 18,
+        total_output_tokens: 12,
+        total_cost_usd: 0,
+        avg_duration_ms: 640,
+        total_words: 12,
+        today_sessions: 1,
+        today_cost: 0,
+        unfiltered_total_sessions: 1,
+      }
+    : (historyData?.stats ?? null);
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const { data: historyPausedData } = useQuery({
@@ -280,278 +315,283 @@ export default function HistoryPage(): React.JSX.Element {
         {isGenuineEmpty ? (
           <EmptyState />
         ) : (
-          <>
-            {/* Stats */}
-            <div className="border-border mb-7 grid grid-cols-2 gap-2.5 border-b pb-7 md:grid-cols-4">
-              <Stat
-                n={(stats?.total_words ?? 0).toLocaleString()}
-                l={t("history.wordsStat", { label: timeLabel })}
-              />
-              <Stat
-                n={String(stats?.total_sessions ?? 0)}
-                l={t("history.sessionsStat", { label: timeLabel })}
-              />
-              <Stat
-                n={
-                  stats && stats.avg_duration_ms > 0
-                    ? formatSeconds(Math.round(stats.avg_duration_ms))
-                    : "—"
-                }
-                l={t("history.avgLatency")}
-              />
-              <Stat
-                accent
-                n={`$${(stats?.total_cost_usd ?? 0).toFixed(2)}`}
-                l={t("history.costStat", { label: timeLabel })}
-              />
-            </div>
+          <div
+            className={cn(
+              "grid min-w-0 gap-7",
+              filterOpen && "min-[1180px]:grid-cols-[minmax(0,1fr)_350px]",
+            )}
+          >
+            <div className="min-w-0">
+              {/* Stats */}
+              <div className="border-border mb-7 grid grid-cols-2 gap-2.5 border-b pb-7 md:grid-cols-4">
+                <Stat
+                  n={(stats?.total_words ?? 0).toLocaleString()}
+                  l={t("history.wordsStat", { label: timeLabel })}
+                />
+                <Stat
+                  n={String(stats?.total_sessions ?? 0)}
+                  l={t("history.sessionsStat", { label: timeLabel })}
+                />
+                <Stat
+                  n={
+                    stats && stats.avg_duration_ms > 0
+                      ? formatSeconds(Math.round(stats.avg_duration_ms))
+                      : "—"
+                  }
+                  l={t("history.avgLatency")}
+                />
+                <Stat
+                  accent
+                  n={`$${(stats?.total_cost_usd ?? 0).toFixed(2)}`}
+                  l={t("history.costStat", { label: timeLabel })}
+                />
+              </div>
 
-            {/* Search & Filter Row */}
-            <div className="mb-6 flex gap-2">
-              <div className="border-border bg-card flex flex-1 items-center gap-2 rounded-lg border px-3 py-2">
-                <Search className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => {
-                    setSearch(e.target.value);
+              {/* Search & Filter Row */}
+              <div className="mb-6 flex gap-2">
+                <div className="border-border bg-card flex flex-1 items-center gap-2 rounded-lg border px-3 py-2">
+                  <Search className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => {
+                      setSearch(e.target.value);
+                      setPage(0);
+                    }}
+                    placeholder={
+                      total === 1
+                        ? t("history.searchSingular", { total })
+                        : t("history.searchPlural", { total })
+                    }
+                    className="placeholder:text-muted-foreground/80 text-foreground flex-1 bg-transparent text-[13px] outline-none"
+                  />
+                  <span className="mono text-muted-foreground text-[10px]">
+                    {SEARCH_SHORTCUT_LABEL}
+                  </span>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => setFilterOpen((open) => !open)}
+                  className={cn(
+                    "text-muted-foreground",
+                    filterOpen && "bg-card",
+                    filterCount > 0 &&
+                      "border-primary text-primary bg-primary/5",
+                  )}
+                  aria-expanded={filterOpen}
+                >
+                  <Filter data-icon="inline-start" />
+                  <span>
+                    {filterOpen ? "Hide Filters" : t("history.filtersBtn")}
+                  </span>
+                  {filterCount > 0 && (
+                    <Badge className="h-4 min-w-4 px-1 text-[9px] font-bold">
+                      {filterCount}
+                    </Badge>
+                  )}
+                </Button>
+              </div>
+
+              {entries.length === 0 ? (
+                <NoSearchResults
+                  hasSearch={!!search}
+                  hasDates={activePreset !== "all-time"}
+                  onClear={() => {
+                    setSearch("");
+                    setActivePreset("all-time");
+                    setCustomStartDate("");
+                    setCustomEndDate("");
                     setPage(0);
                   }}
-                  placeholder={
-                    total === 1
-                      ? t("history.searchSingular", { total })
-                      : t("history.searchPlural", { total })
-                  }
-                  className="placeholder:text-muted-foreground/80 text-foreground flex-1 bg-transparent text-[13px] outline-none"
                 />
-                <span className="mono text-muted-foreground text-[10px]">
-                  {SEARCH_SHORTCUT_LABEL}
-                </span>
-              </div>
-              <Button
-                variant="outline"
-                onClick={() => setFilterOpen(true)}
-                className={cn(
-                  "text-muted-foreground",
-                  filterCount > 0 && "border-primary text-primary bg-primary/5",
-                )}
-              >
-                <Filter data-icon="inline-start" />
-                <span>{t("history.filtersBtn")}</span>
-                {filterCount > 0 && (
-                  <Badge className="h-4 min-w-4 px-1 text-[9px] font-bold">
-                    {filterCount}
-                  </Badge>
-                )}
-              </Button>
+              ) : (
+                groups.map((group) =>
+                  group.items.length === 0 ? null : (
+                    <FeedGroup
+                      key={group.label}
+                      label={
+                        group.label === "Today"
+                          ? t("history.groupToday")
+                          : group.label === "Yesterday"
+                            ? t("history.groupYesterday")
+                            : group.label
+                      }
+                    >
+                      {group.items.map((entry) => (
+                        <FeedItem
+                          key={entry.id}
+                          entry={entry}
+                          onDelete={deleteEntry}
+                        />
+                      ))}
+                    </FeedGroup>
+                  ),
+                )
+              )}
+
+              {/* Pagination */}
+              {total > PAGE_SIZE && (
+                <div className="border-border mt-4 flex items-center justify-between border-t pt-4">
+                  <span className="mono text-muted-foreground text-[11px] uppercase tracking-[0.12em]">
+                    {total}{" "}
+                    {total === 1
+                      ? t("history.sessionSingular")
+                      : t("history.sessionPlural")}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => setPage((p) => Math.max(0, p - 1))}
+                      disabled={page === 0}
+                      aria-label="Previous page"
+                    >
+                      <ChevronLeft />
+                    </Button>
+                    <span className="mono text-muted-foreground px-2 text-[11px]">
+                      {page + 1} / {totalPages}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() =>
+                        setPage((p) => Math.min(totalPages - 1, p + 1))
+                      }
+                      disabled={page >= totalPages - 1}
+                      aria-label="Next page"
+                    >
+                      <ChevronRight />
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
 
-            {entries.length === 0 ? (
-              <NoSearchResults
-                hasSearch={!!search}
-                hasDates={activePreset !== "all-time"}
-                onClear={() => {
-                  setSearch("");
-                  setActivePreset("all-time");
-                  setCustomStartDate("");
-                  setCustomEndDate("");
-                  setPage(0);
-                }}
-              />
-            ) : (
-              groups.map((group) =>
-                group.items.length === 0 ? null : (
-                  <FeedGroup
-                    key={group.label}
-                    label={
-                      group.label === "Today"
-                        ? t("history.groupToday")
-                        : group.label === "Yesterday"
-                          ? t("history.groupYesterday")
-                          : group.label
-                    }
-                  >
-                    {group.items.map((entry) => (
-                      <FeedItem
-                        key={entry.id}
-                        entry={entry}
-                        onDelete={deleteEntry}
-                      />
-                    ))}
-                  </FeedGroup>
-                ),
-              )
-            )}
+            {filterOpen && (
+              <aside className="border-border bg-card/60 order-first flex flex-col gap-6 rounded-[14px] border p-6 pb-5 shadow-sm animate-in fade-in-0 slide-in-from-right-4 duration-200 min-[1180px]:sticky min-[1180px]:top-[128px] min-[1180px]:order-none min-[1180px]:mt-[128px]">
+                <div>
+                  <h2 className="text-foreground text-lg font-semibold">
+                    {t("history.filterTitle")}
+                  </h2>
+                </div>
 
-            {/* Pagination */}
-            {total > PAGE_SIZE && (
-              <div className="border-border mt-4 flex items-center justify-between border-t pt-4">
-                <span className="mono text-muted-foreground text-[11px] uppercase tracking-[0.12em]">
-                  {total}{" "}
-                  {total === 1
-                    ? t("history.sessionSingular")
-                    : t("history.sessionPlural")}
-                </span>
-                <div className="flex items-center gap-1">
+                <div className="flex flex-col gap-6">
+                  <div className="flex flex-col gap-2">
+                    <Label
+                      htmlFor="start-date-input"
+                      className="mono text-muted-foreground text-[10px] uppercase tracking-wider"
+                    >
+                      {t("history.startDate")}
+                    </Label>
+                    <Input
+                      id="start-date-input"
+                      type="date"
+                      value={startDate}
+                      max={endDate || undefined}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setActivePreset("custom");
+                        if (endDate && val > endDate) {
+                          setCustomStartDate(endDate);
+                          setCustomEndDate(endDate);
+                        } else {
+                          setCustomStartDate(val);
+                          setCustomEndDate(endDate);
+                        }
+                        setPage(0);
+                      }}
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <Label
+                      htmlFor="end-date-input"
+                      className="mono text-muted-foreground text-[10px] uppercase tracking-wider"
+                    >
+                      {t("history.endDate")}
+                    </Label>
+                    <Input
+                      id="end-date-input"
+                      type="date"
+                      value={endDate}
+                      min={startDate || undefined}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setActivePreset("custom");
+                        if (startDate && val < startDate) {
+                          setCustomEndDate(startDate);
+                          setCustomStartDate(startDate);
+                        } else {
+                          setCustomEndDate(val);
+                          setCustomStartDate(startDate);
+                        }
+                        setPage(0);
+                      }}
+                    />
+                  </div>
+
+                  {/* Quick Presets */}
+                  <div className="flex flex-col gap-2">
+                    <span className="mono text-muted-foreground text-[10px] uppercase tracking-wider">
+                      {t("history.presetsLabel")}
+                    </span>
+                    <div className="grid grid-cols-3 gap-2.5 min-[1180px]:grid-cols-1">
+                      <Button
+                        variant={isTodayPreset ? "default" : "outline"}
+                        size="sm"
+                        className="w-full"
+                        onClick={() => {
+                          setActivePreset("today");
+                          setPage(0);
+                        }}
+                      >
+                        {t("history.presetToday")}
+                      </Button>
+                      <Button
+                        variant={isWeeklyPreset ? "default" : "outline"}
+                        size="sm"
+                        className="w-full"
+                        onClick={() => {
+                          setActivePreset("weekly");
+                          setPage(0);
+                        }}
+                      >
+                        {t("history.presetLast7")}
+                      </Button>
+                      <Button
+                        variant={isMonthlyPreset ? "default" : "outline"}
+                        size="sm"
+                        className="w-full"
+                        onClick={() => {
+                          setActivePreset("monthly");
+                          setPage(0);
+                        }}
+                      >
+                        {t("history.presetLast30")}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border-border border-t pt-4">
                   <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => setPage((p) => Math.max(0, p - 1))}
-                    disabled={page === 0}
-                    aria-label="Previous page"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => {
+                      setActivePreset("all-time");
+                      setCustomStartDate("");
+                      setCustomEndDate("");
+                      setPage(0);
+                    }}
                   >
-                    <ChevronLeft />
-                  </Button>
-                  <span className="mono text-muted-foreground px-2 text-[11px]">
-                    {page + 1} / {totalPages}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() =>
-                      setPage((p) => Math.min(totalPages - 1, p + 1))
-                    }
-                    disabled={page >= totalPages - 1}
-                    aria-label="Next page"
-                  >
-                    <ChevronRight />
+                    {t("history.clearAll")}
                   </Button>
                 </div>
-              </div>
+              </aside>
             )}
-          </>
+          </div>
         )}
       </div>
-
-      <Sheet open={filterOpen} onOpenChange={setFilterOpen}>
-        <SheetContent className="flex flex-col p-6 w-[340px] sm:w-[400px]">
-          <SheetHeader className="p-0 mb-4">
-            <SheetTitle className="text-lg font-semibold">
-              {t("history.filterTitle")}
-            </SheetTitle>
-          </SheetHeader>
-
-          <div className="flex flex-col gap-5 flex-1">
-            <div className="flex flex-col gap-2">
-              <Label
-                htmlFor="start-date-input"
-                className="mono text-muted-foreground text-[10px] uppercase tracking-wider"
-              >
-                {t("history.startDate")}
-              </Label>
-              <Input
-                id="start-date-input"
-                type="date"
-                value={startDate}
-                max={endDate || undefined}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setActivePreset("custom");
-                  if (endDate && val > endDate) {
-                    setCustomStartDate(endDate);
-                    setCustomEndDate(endDate);
-                  } else {
-                    setCustomStartDate(val);
-                    setCustomEndDate(endDate);
-                  }
-                  setPage(0);
-                }}
-              />
-            </div>
-
-            <div className="flex flex-col gap-2">
-              <Label
-                htmlFor="end-date-input"
-                className="mono text-muted-foreground text-[10px] uppercase tracking-wider"
-              >
-                {t("history.endDate")}
-              </Label>
-              <Input
-                id="end-date-input"
-                type="date"
-                value={endDate}
-                min={startDate || undefined}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setActivePreset("custom");
-                  if (startDate && val < startDate) {
-                    setCustomEndDate(startDate);
-                    setCustomStartDate(startDate);
-                  } else {
-                    setCustomEndDate(val);
-                    setCustomStartDate(startDate);
-                  }
-                  setPage(0);
-                }}
-              />
-            </div>
-
-            {/* Quick Presets */}
-            <div className="flex flex-col gap-2 mt-2">
-              <span className="mono text-muted-foreground text-[10px] uppercase tracking-wider">
-                {t("history.presetsLabel")}
-              </span>
-              <div className="grid grid-cols-3 gap-2">
-                <Button
-                  variant={isTodayPreset ? "default" : "outline"}
-                  size="sm"
-                  className="w-full"
-                  onClick={() => {
-                    setActivePreset("today");
-                    setPage(0);
-                  }}
-                >
-                  {t("history.presetToday")}
-                </Button>
-                <Button
-                  variant={isWeeklyPreset ? "default" : "outline"}
-                  size="sm"
-                  className="w-full"
-                  onClick={() => {
-                    setActivePreset("weekly");
-                    setPage(0);
-                  }}
-                >
-                  {t("history.presetLast7")}
-                </Button>
-                <Button
-                  variant={isMonthlyPreset ? "default" : "outline"}
-                  size="sm"
-                  className="w-full"
-                  onClick={() => {
-                    setActivePreset("monthly");
-                    setPage(0);
-                  }}
-                >
-                  {t("history.presetLast30")}
-                </Button>
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-auto pt-4 border-t border-border flex gap-3">
-            <Button
-              variant="outline"
-              className="flex-1"
-              onClick={() => {
-                setActivePreset("all-time");
-                setCustomStartDate("");
-                setCustomEndDate("");
-                setPage(0);
-              }}
-            >
-              {t("history.clearAll")}
-            </Button>
-            <Button
-              variant="default"
-              className="flex-1"
-              onClick={() => setFilterOpen(false)}
-            >
-              {t("history.done")}
-            </Button>
-          </div>
-        </SheetContent>
-      </Sheet>
     </div>
   );
 }
