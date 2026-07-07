@@ -1312,7 +1312,7 @@ function NetworkPanel(): React.JSX.Element {
           )}
         />
       </Row>
-      <div className="border-border bg-secondary/40 text-muted-foreground mt-1 flex items-start gap-2.5 rounded-[10px] border px-3.5 py-3 text-[12px] leading-[1.55]">
+      <div className="border-border bg-secondary/40 text-muted-foreground mt-1 mb-4 flex items-start gap-2.5 rounded-[10px] border px-3.5 py-3 text-[12px] leading-[1.55]">
         <Info className="mt-px h-3.5 w-3.5 shrink-0 opacity-70" />
         <span>{t("settings.network.envNote")}</span>
       </div>
