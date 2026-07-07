@@ -1,4 +1,20 @@
 # Changelog
+## 0.4.3
+
+### Bug Fixes 🐛
+
+- (electron) Normalize transcription pill bars to the voice band by @AyushSrivastava1818 in [#376](https://github.com/freestyle-voice/freestyle/pull/376)
+- Pin transformers to <5.13 in mlx-asr worker build by @Maheidem in [#404](https://github.com/freestyle-voice/freestyle/pull/404)
+
+### Other
+
+- Remove MCP endpoint by @matteo8p in [#412](https://github.com/freestyle-voice/freestyle/pull/412)
+- Simplify the transcription logic on the front end (v3) by @matteo8p in [#411](https://github.com/freestyle-voice/freestyle/pull/411)
+- Remove streaming capacity by @matteo8p in [#410](https://github.com/freestyle-voice/freestyle/pull/410)
+- NORMALIZE UI LABEL TYPOGRAPHY by @tulsianigatik07-tech in [#409](https://github.com/freestyle-voice/freestyle/pull/409)
+- Feat/tone page rework by @tigerisaac in [#408](https://github.com/freestyle-voice/freestyle/pull/408)
+- Add directories to tsconfig. by @matteo8p in [#406](https://github.com/freestyle-voice/freestyle/pull/406)
+
 ## 0.4.2
 
 ### Bug Fixes 🐛
