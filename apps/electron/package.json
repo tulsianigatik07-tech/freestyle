@@ -41,7 +41,6 @@
     "@tanstack/react-query": "^5.101.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "date-fns": "^4.4.0",
     "diff": "^8.0.4",
     "electron-updater": "^6.3.9",
     "freestyle-voice": "workspace:*",
