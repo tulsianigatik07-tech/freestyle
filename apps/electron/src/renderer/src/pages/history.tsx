@@ -369,27 +369,26 @@ export default function HistoryPage(): React.JSX.Element {
                     {SEARCH_SHORTCUT_LABEL}
                   </span>
                 </div>
-                <Button
-                  variant="outline"
-                  onClick={() => setFilterOpen((open) => !open)}
-                  className={cn(
-                    "text-muted-foreground",
-                    filterOpen && "bg-card",
-                    filterCount > 0 &&
-                      "border-primary text-primary bg-primary/5",
-                  )}
-                  aria-expanded={filterOpen}
-                >
-                  <Filter data-icon="inline-start" />
-                  <span>
-                    {filterOpen ? "Hide Filters" : t("history.filtersBtn")}
-                  </span>
-                  {filterCount > 0 && (
-                    <Badge className="h-4 min-w-4 px-1 text-[9px] font-bold">
-                      {filterCount}
-                    </Badge>
-                  )}
-                </Button>
+                {!filterOpen && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setFilterOpen(true)}
+                    className={cn(
+                      "text-muted-foreground h-auto self-stretch",
+                      filterCount > 0 &&
+                        "border-primary text-primary bg-primary/5",
+                    )}
+                    aria-expanded={filterOpen}
+                  >
+                    <Filter data-icon="inline-start" />
+                    <span>{t("history.filtersBtn")}</span>
+                    {filterCount > 0 && (
+                      <Badge className="h-4 min-w-4 px-1 text-[9px] font-bold">
+                        {filterCount}
+                      </Badge>
+                    )}
+                  </Button>
+                )}
               </div>
 
               {entries.length === 0 ? (
@@ -469,10 +468,18 @@ export default function HistoryPage(): React.JSX.Element {
 
             {filterOpen && (
               <aside className="border-border bg-card/60 order-first flex flex-col gap-6 rounded-[14px] border p-6 pb-5 shadow-sm animate-in fade-in-0 slide-in-from-right-4 duration-200 min-[1180px]:sticky min-[1180px]:top-[128px] min-[1180px]:order-none min-[1180px]:mt-[128px]">
-                <div>
+                <div className="flex items-center justify-between gap-3">
                   <h2 className="text-foreground text-lg font-semibold">
                     {t("history.filterTitle")}
                   </h2>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setFilterOpen(false)}
+                    aria-label="Close filters"
+                  >
+                    Close
+                  </Button>
                 </div>
 
                 <div className="flex flex-col gap-6">
