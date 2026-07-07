@@ -1,24 +1,32 @@
 import { Badge } from "@renderer/components/ui/badge";
 import { Button } from "@renderer/components/ui/button";
-import { Input } from "@renderer/components/ui/input";
 import { Label } from "@renderer/components/ui/label";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@renderer/components/ui/popover";
 import { getClient } from "@renderer/lib/api";
 import { SEARCH_SHORTCUT_LABEL } from "@renderer/lib/platform";
 import { cn, ON_DEVICE_PHRASE } from "@renderer/lib/utils";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  CalendarDays,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock,
   Copy,
   Filter,
+  PanelRight,
   Redo2,
+  RotateCcw,
   Search,
   Trash2,
   Undo2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { type DateRange, DayPicker } from "react-day-picker";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import { SETTINGS_KEYS } from "../../../shared/settings-keys";
@@ -83,6 +91,27 @@ function getLocalDateString(d: Date): string {
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function parseLocalDate(value: string): Date | undefined {
+  if (!value) return undefined;
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return undefined;
+  return new Date(year, month - 1, day);
+}
+
+function formatRangeDate(value: string): string {
+  if (!value) return "Select";
+  const date = parseLocalDate(value);
+  if (!date) return "Select";
+  const day = date.getDate();
+  const month = date.toLocaleDateString(undefined, { month: "short" });
+  const year = date.getFullYear();
+  return `${day} ${month}, ${year}`;
+}
+
+function formatRangeLabel(start: string, end: string): string {
+  return `${formatRangeDate(start)} - ${formatRangeDate(end)}`;
 }
 
 /** Get a date key for grouping: "Today", "Yesterday", or "Day, Mon DD" */
@@ -156,6 +185,16 @@ export default function HistoryPage(): React.JSX.Element {
   const timeLabel = getTimeLabel();
 
   const filterCount = activePreset !== "all-time" ? 1 : 0;
+  const selectedDateRange: DateRange = {
+    from: parseLocalDate(startDate),
+    to: parseLocalDate(endDate),
+  };
+  const selectDateRange = (range: DateRange | undefined): void => {
+    setActivePreset("custom");
+    setCustomStartDate(range?.from ? getLocalDateString(range.from) : "");
+    setCustomEndDate(range?.to ? getLocalDateString(range.to) : "");
+    setPage(0);
+  };
 
   const queryClient = useQueryClient();
 
@@ -318,12 +357,18 @@ export default function HistoryPage(): React.JSX.Element {
           <div
             className={cn(
               "grid min-w-0 gap-7",
-              filterOpen && "min-[1180px]:grid-cols-[minmax(0,1fr)_350px]",
+              filterOpen &&
+                "grid-cols-[minmax(0,1fr)_minmax(300px,340px)] gap-5",
             )}
           >
             <div className="min-w-0">
               {/* Stats */}
-              <div className="border-border mb-7 grid grid-cols-2 gap-2.5 border-b pb-7 md:grid-cols-4">
+              <div
+                className={cn(
+                  "border-border mb-7 grid grid-cols-2 gap-2.5 border-b pb-7",
+                  !filterOpen && "md:grid-cols-4",
+                )}
+              >
                 <Stat
                   n={(stats?.total_words ?? 0).toLocaleString()}
                   l={t("history.wordsStat", { label: timeLabel })}
@@ -467,86 +512,125 @@ export default function HistoryPage(): React.JSX.Element {
             </div>
 
             {filterOpen && (
-              <aside className="border-border bg-card/60 order-first flex flex-col gap-6 rounded-[14px] border p-6 pb-5 shadow-sm animate-in fade-in-0 slide-in-from-right-4 duration-200 min-[1180px]:sticky min-[1180px]:top-[128px] min-[1180px]:order-none min-[1180px]:mt-[128px]">
-                <div className="flex items-center justify-between gap-3">
-                  <h2 className="text-foreground text-lg font-semibold">
-                    {t("history.filterTitle")}
-                  </h2>
+              <aside className="border-border/70 bg-background/25 sticky top-0 flex h-[calc(100vh-88px)] min-h-[520px] flex-col overflow-hidden border-l px-4 py-4 shadow-[-12px_0_28px_-28px_var(--glass-shadow)] animate-in fade-in-0 slide-in-from-right-3 duration-200">
+                <div className="border-border/70 flex h-10 items-center gap-1.5 border-b pb-3">
+                  <div className="min-w-0 flex-1">
+                    <h2 className="text-foreground text-[14px] font-semibold">
+                      {t("history.filterTitle")}
+                    </h2>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="icon-sm"
+                    onClick={() => {
+                      setActivePreset("all-time");
+                      setCustomStartDate("");
+                      setCustomEndDate("");
+                      setPage(0);
+                    }}
+                    aria-label={t("history.clearAll")}
+                    title={t("history.clearAll")}
+                  >
+                    <RotateCcw />
+                  </Button>
                   <Button
                     variant="ghost"
-                    size="sm"
+                    size="icon-sm"
                     onClick={() => setFilterOpen(false)}
                     aria-label="Close filters"
+                    title="Close filters"
                   >
-                    Close
+                    <PanelRight />
                   </Button>
                 </div>
 
-                <div className="flex flex-col gap-6">
-                  <div className="flex flex-col gap-2">
-                    <Label
-                      htmlFor="start-date-input"
-                      className="mono text-muted-foreground text-[10px] uppercase tracking-wider"
-                    >
-                      {t("history.startDate")}
-                    </Label>
-                    <Input
-                      id="start-date-input"
-                      type="date"
-                      value={startDate}
-                      max={endDate || undefined}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setActivePreset("custom");
-                        if (endDate && val > endDate) {
-                          setCustomStartDate(endDate);
-                          setCustomEndDate(endDate);
-                        } else {
-                          setCustomStartDate(val);
-                          setCustomEndDate(endDate);
-                        }
-                        setPage(0);
-                      }}
-                    />
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <Label
-                      htmlFor="end-date-input"
-                      className="mono text-muted-foreground text-[10px] uppercase tracking-wider"
-                    >
-                      {t("history.endDate")}
-                    </Label>
-                    <Input
-                      id="end-date-input"
-                      type="date"
-                      value={endDate}
-                      min={startDate || undefined}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setActivePreset("custom");
-                        if (startDate && val < startDate) {
-                          setCustomEndDate(startDate);
-                          setCustomStartDate(startDate);
-                        } else {
-                          setCustomEndDate(val);
-                          setCustomStartDate(startDate);
-                        }
-                        setPage(0);
-                      }}
-                    />
+                <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto pt-4 pr-1">
+                  <div className="flex flex-col gap-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="mono text-muted-foreground text-[10px] uppercase tracking-wider">
+                        Date range
+                      </Label>
+                      <CalendarDays className="text-muted-foreground h-3.5 w-3.5" />
+                    </div>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className="border-border/75 bg-card/45 hover:bg-card/60 h-9 w-full justify-start gap-2 px-3 text-left text-[13px] font-medium shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]"
+                        >
+                          <CalendarDays data-icon="inline-start" />
+                          <span className="truncate">
+                            {formatRangeLabel(startDate, endDate)}
+                          </span>
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="end"
+                        className="w-auto p-3"
+                        sideOffset={8}
+                      >
+                        <DayPicker
+                          mode="range"
+                          numberOfMonths={2}
+                          selected={selectedDateRange}
+                          onSelect={selectDateRange}
+                          defaultMonth={
+                            selectedDateRange.from ?? selectedDateRange.to
+                          }
+                          classNames={{
+                            root: "p-0",
+                            months: "flex gap-4",
+                            month: "flex flex-col gap-3",
+                            month_caption:
+                              "flex h-7 items-center justify-center",
+                            caption_label:
+                              "text-[13px] font-medium text-foreground",
+                            nav: "absolute inset-x-3 top-3 flex items-center justify-between",
+                            button_previous:
+                              "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40",
+                            button_next:
+                              "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40",
+                            chevron: "size-4",
+                            month_grid:
+                              "w-full border-collapse border-spacing-0",
+                            weekdays: "flex",
+                            weekday:
+                              "text-muted-foreground flex size-8 items-center justify-center text-[11px] font-normal",
+                            week: "mt-1 flex w-full",
+                            day: "relative flex size-8 items-center justify-center p-0 text-center text-[12px]",
+                            day_button:
+                              "relative z-10 inline-flex size-8 items-center justify-center rounded-md transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                            outside: "text-muted-foreground/45",
+                            today:
+                              "after:bg-primary after:absolute after:bottom-1 after:left-1/2 after:z-20 after:size-1 after:-translate-x-1/2 after:rounded-full",
+                            selected:
+                              "text-primary-foreground [&>button]:bg-primary [&>button]:text-primary-foreground [&>button]:hover:bg-primary",
+                            range_start:
+                              "bg-primary/15 rounded-l-md text-primary-foreground [&>button]:bg-primary [&>button]:text-primary-foreground",
+                            range_middle:
+                              "bg-primary/15 text-foreground [&>button]:rounded-none [&>button]:hover:bg-transparent",
+                            range_end:
+                              "bg-primary/15 rounded-r-md text-primary-foreground [&>button]:bg-primary [&>button]:text-primary-foreground",
+                          }}
+                        />
+                      </PopoverContent>
+                    </Popover>
                   </div>
 
                   {/* Quick Presets */}
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col gap-2.5">
                     <span className="mono text-muted-foreground text-[10px] uppercase tracking-wider">
                       {t("history.presetsLabel")}
                     </span>
-                    <div className="grid grid-cols-3 gap-2.5 min-[1180px]:grid-cols-1">
+                    <div className="border-border/70 bg-card/35 grid grid-cols-3 rounded-lg border p-0.5">
                       <Button
-                        variant={isTodayPreset ? "default" : "outline"}
+                        variant="ghost"
                         size="sm"
-                        className="w-full"
+                        className={cn(
+                          "text-muted-foreground h-7 w-full rounded-md px-1.5 text-[11px] shadow-none hover:text-foreground",
+                          isTodayPreset &&
+                            "bg-background text-foreground shadow-sm ring-1 ring-border",
+                        )}
                         onClick={() => {
                           setActivePreset("today");
                           setPage(0);
@@ -555,9 +639,13 @@ export default function HistoryPage(): React.JSX.Element {
                         {t("history.presetToday")}
                       </Button>
                       <Button
-                        variant={isWeeklyPreset ? "default" : "outline"}
+                        variant="ghost"
                         size="sm"
-                        className="w-full"
+                        className={cn(
+                          "text-muted-foreground h-7 w-full rounded-md px-1.5 text-[11px] shadow-none hover:text-foreground",
+                          isWeeklyPreset &&
+                            "bg-background text-foreground shadow-sm ring-1 ring-border",
+                        )}
                         onClick={() => {
                           setActivePreset("weekly");
                           setPage(0);
@@ -566,9 +654,13 @@ export default function HistoryPage(): React.JSX.Element {
                         {t("history.presetLast7")}
                       </Button>
                       <Button
-                        variant={isMonthlyPreset ? "default" : "outline"}
+                        variant="ghost"
                         size="sm"
-                        className="w-full"
+                        className={cn(
+                          "text-muted-foreground h-7 w-full rounded-md px-1.5 text-[11px] shadow-none hover:text-foreground",
+                          isMonthlyPreset &&
+                            "bg-background text-foreground shadow-sm ring-1 ring-border",
+                        )}
                         onClick={() => {
                           setActivePreset("monthly");
                           setPage(0);
@@ -578,21 +670,6 @@ export default function HistoryPage(): React.JSX.Element {
                       </Button>
                     </div>
                   </div>
-                </div>
-
-                <div className="border-border border-t pt-4">
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={() => {
-                      setActivePreset("all-time");
-                      setCustomStartDate("");
-                      setCustomEndDate("");
-                      setPage(0);
-                    }}
-                  >
-                    {t("history.clearAll")}
-                  </Button>
                 </div>
               </aside>
             )}
