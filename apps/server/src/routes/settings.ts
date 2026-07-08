@@ -9,6 +9,7 @@ import {
   cleanupWorkToneSchema,
   disabledPluginsSettingSchema,
   localLlmConfigSchema,
+  openaiSttBaseUrlSchema,
   pluginsSettingSchema,
   proxyUrlSettingSchema,
   settingValueSchema,
@@ -119,6 +120,17 @@ const settings = new Hono()
       const parsed = disabledPluginsSettingSchema.safeParse(parsedJson);
       if (!parsed.success) {
         return c.json({ error: "Invalid disabled_plugins setting" }, 400);
+      }
+    } else if (key === "openai_stt_base_url") {
+      const parsed = openaiSttBaseUrlSchema.safeParse(body.value);
+      if (!parsed.success) {
+        return c.json(
+          {
+            error:
+              parsed.error.issues[0]?.message ?? "Invalid OpenAI STT base URL",
+          },
+          400,
+        );
       }
     } else if (key === PROXY_URL_SETTING) {
       const parsed = proxyUrlSettingSchema.safeParse(body.value);
