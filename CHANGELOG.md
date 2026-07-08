@@ -1,4 +1,16 @@
 # Changelog
+## 0.4.5
+
+### Bug Fixes 🐛
+
+- (history) Disable reset on defaults and clear filter panel bg by @MathurAditya724 in [#440](https://github.com/freestyle-voice/freestyle/pull/440)
+- (models) Remove non-interactive On-device row from API keys section by @MathurAditya724 in [#442](https://github.com/freestyle-voice/freestyle/pull/442)
+
+### Other
+
+- release: 0.1.1 by @MathurAditya724 in [4957a23c](https://github.com/freestyle-voice/freestyle/commit/4957a23cc7a230ae3dd1d67bf7aa152a87930e79)
+- release: 0.4.4 by @MathurAditya724 in [0c2a364e](https://github.com/freestyle-voice/freestyle/commit/0c2a364ef8aba21c3d8b37fe2f37cccac35f7313)
+
 ## 0.4.4
 
 ### New Features ✨
