@@ -2,11 +2,6 @@ import { z } from "zod";
 
 const OPENAI_STT_BASE_URL_MAX = 2048;
 
-// URL is a runtime global in both Node.js and browser/Electron-renderer
-// environments, but this package's tsconfig intentionally omits DOM/Node
-// lib types to stay environment-agnostic across server + renderer. Declare
-// only the narrow shape this file needs, rather than pulling in a full
-// ambient lib (which would leak `window`, `document`, etc. everywhere).
 interface ParsedUrl {
   protocol: string;
   search: string;
@@ -25,11 +20,6 @@ function parseHttpUrl(value: string): ParsedUrl | null {
   }
 }
 
-/**
- * Optional OpenAI-compatible batch STT base URL. Empty string clears it.
- * Query strings and hashes are rejected because SDK request paths are appended
- * to the normalized base URL.
- */
 export const openaiSttBaseUrlSchema = z
   .string()
   .max(OPENAI_STT_BASE_URL_MAX)
