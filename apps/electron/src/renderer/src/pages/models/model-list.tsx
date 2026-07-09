@@ -30,7 +30,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   PICKER_MODAL_BODY,
@@ -341,6 +341,7 @@ export function ModelList({
         : cloudOnly
           ? "Cloud cleanup models"
           : "All cleanup models";
+  let openaiSttConfigRendered = false;
 
   return (
     <>
@@ -425,9 +426,22 @@ export function ModelList({
             connected={m.localLlm.connected}
           />
         ) : (
-          visible.map((row, i) => (
-            <ModelRow key={row.key} row={row} first={i === 0} />
-          ))
+          visible.map((row, i) => {
+            const showOpenaiSttConfig =
+              type === "voice" &&
+              row.source === "cloud" &&
+              row.provider === "openai" &&
+              !openaiSttConfigRendered;
+            if (showOpenaiSttConfig) {
+              openaiSttConfigRendered = true;
+            }
+            return (
+              <Fragment key={row.key}>
+                <ModelRow row={row} first={i === 0} />
+                {showOpenaiSttConfig && <OpenaiSttBaseUrlConfig m={m} />}
+              </Fragment>
+            );
+          })
         )}
         {hiddenCount > 0 && (
           <Button
@@ -773,6 +787,64 @@ function LocalLlmConnect({ m }: { m: UseModels }): React.JSX.Element {
         {localLlm.connected === false && localLlm.error && (
           <p className="text-destructive text-[12px] leading-snug">
             {localLlm.error}
+          </p>
+        )}
+      </form>
+    </div>
+  );
+}
+
+function OpenaiSttBaseUrlConfig({ m }: { m: UseModels }): React.JSX.Element {
+  return (
+    <div className="border-border bg-muted/20 border-t px-5 py-4">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void m.saveOpenaiSttBaseUrl();
+        }}
+        className="space-y-2.5"
+      >
+        <div>
+          <label
+            htmlFor="openai-stt-base-url"
+            className="text-foreground text-[12.5px] font-medium"
+          >
+            Custom base URL
+          </label>
+          <p className="text-muted-foreground mt-1 text-[12px] leading-relaxed">
+            Optional OpenAI-compatible STT endpoint. Leave empty to use OpenAI.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Input
+            id="openai-stt-base-url"
+            type="text"
+            value={m.openaiSttBaseUrl}
+            onChange={(e) => m.setOpenaiSttBaseUrl(e.target.value)}
+            placeholder="https://example.com"
+            className="min-w-0 flex-1"
+            aria-invalid={!!m.openaiSttBaseUrlError}
+          />
+          <Button
+            type="submit"
+            variant="secondary"
+            size="sm"
+            disabled={m.openaiSttBaseUrlSaving}
+            className="shrink-0"
+          >
+            {m.openaiSttBaseUrlSaving ? (
+              <span className="flex items-center gap-1.5">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Saving…
+              </span>
+            ) : (
+              "Save"
+            )}
+          </Button>
+        </div>
+        {m.openaiSttBaseUrlError && (
+          <p className="text-destructive text-[12px] leading-snug">
+            {m.openaiSttBaseUrlError}
           </p>
         )}
       </form>

@@ -55,6 +55,11 @@ export interface UseModels {
   >;
 
   localLlm: LocalLlmState;
+  openaiSttBaseUrl: string;
+  setOpenaiSttBaseUrl: (value: string) => void;
+  openaiSttBaseUrlSaving: boolean;
+  openaiSttBaseUrlError: string | null;
+  saveOpenaiSttBaseUrl: () => Promise<void>;
 
   // Actions — each refetches as needed
   configureModel: (
@@ -76,6 +81,23 @@ export interface UseModels {
   saveMlxKeepAliveMinutes: (minutes: number) => void;
   deleteProvider: (provider: string) => Promise<void>;
   reload: () => Promise<void>;
+}
+
+async function readSettingsError(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    if (
+      body &&
+      typeof body === "object" &&
+      "error" in body &&
+      typeof body.error === "string"
+    ) {
+      return body.error;
+    }
+  } catch {
+    return "Failed to save custom base URL.";
+  }
+  return "Failed to save custom base URL.";
 }
 
 export function useModels(): UseModels {
@@ -108,6 +130,12 @@ export function useModels(): UseModels {
   const [localError, setLocalError] = useState<string | null>(null);
   const [localModels, setLocalModels] = useState<string[]>([]);
 
+  const [openaiSttBaseUrl, setOpenaiSttBaseUrl] = useState("");
+  const [openaiSttBaseUrlSaving, setOpenaiSttBaseUrlSaving] = useState(false);
+  const [openaiSttBaseUrlError, setOpenaiSttBaseUrlError] = useState<
+    string | null
+  >(null);
+
   // -------------------------------------------------------------------------
   // Loaders
   // -------------------------------------------------------------------------
@@ -123,6 +151,7 @@ export function useModels(): UseModels {
         localUrlRes,
         localKeyRes,
         mlxKeepAliveRes,
+        openaiSttBaseUrlRes,
       ] = await Promise.all([
         client.api.models.available.$get(),
         client.api.models.configured.$get(),
@@ -138,6 +167,9 @@ export function useModels(): UseModels {
         }),
         client.api.settings[":key"].$get({
           param: { key: SETTINGS_KEYS.mlxAsrKeepAliveMinutes },
+        }),
+        client.api.settings[":key"].$get({
+          param: { key: SETTINGS_KEYS.openaiSttBaseUrl },
         }),
       ]);
       if (availRes.ok) setAvailable(await availRes.json());
@@ -161,6 +193,14 @@ export function useModels(): UseModels {
         if (Number.isFinite(minutes)) {
           setMlxKeepAliveMinutes(clampMlxKeepAliveMinutes(minutes));
         }
+      }
+      if (openaiSttBaseUrlRes.ok) {
+        const data = await openaiSttBaseUrlRes.json();
+        setOpenaiSttBaseUrl(
+          "value" in data && typeof data.value === "string" ? data.value : "",
+        );
+      } else {
+        setOpenaiSttBaseUrl("");
       }
     } catch (err) {
       console.error("Failed to load models data:", err);
@@ -568,6 +608,33 @@ export function useModels(): UseModels {
     }
   }, [localUrl, localApiKey, loadData]);
 
+  const saveOpenaiSttBaseUrl = useCallback(async () => {
+    setOpenaiSttBaseUrlSaving(true);
+    setOpenaiSttBaseUrlError(null);
+    const value = openaiSttBaseUrl.trim();
+    try {
+      const client = getClient();
+      const res = value
+        ? await client.api.settings[":key"].$put({
+            param: { key: SETTINGS_KEYS.openaiSttBaseUrl },
+            json: { value },
+          })
+        : await client.api.settings[":key"].$delete({
+            param: { key: SETTINGS_KEYS.openaiSttBaseUrl },
+          });
+
+      if (!res.ok) {
+        setOpenaiSttBaseUrlError(await readSettingsError(res));
+        return;
+      }
+      setOpenaiSttBaseUrl(value);
+    } catch {
+      setOpenaiSttBaseUrlError("Failed to save custom base URL.");
+    } finally {
+      setOpenaiSttBaseUrlSaving(false);
+    }
+  }, [openaiSttBaseUrl]);
+
   return {
     loading,
     available,
@@ -596,6 +663,11 @@ export function useModels(): UseModels {
       test: testLocalLlm,
       clearStatus: clearLocalStatus,
     },
+    openaiSttBaseUrl,
+    setOpenaiSttBaseUrl,
+    openaiSttBaseUrlSaving,
+    openaiSttBaseUrlError,
+    saveOpenaiSttBaseUrl,
     configureModel,
     saveKey,
     selectLocalVoice,
