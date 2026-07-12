@@ -1,4 +1,14 @@
 # Changelog
+## 0.5.0
+
+### New Features ✨
+
+- Auto-delete transcription history after a configurable period by @dchaudhari7177 in [#424](https://github.com/freestyle-voice/freestyle/pull/424)
+
+### Other
+
+- Add trailing white space to paste. by @matteo8p in [#445](https://github.com/freestyle-voice/freestyle/pull/445)
+
 ## 0.4.5
 
 ### Bug Fixes 🐛
