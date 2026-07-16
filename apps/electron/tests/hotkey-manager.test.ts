@@ -1,11 +1,15 @@
 import { expect, test } from "@playwright/test";
 import { runFactoryResetLifecycle } from "../src/main/factory-reset-lifecycle";
+import { HotkeyBindingService } from "../src/main/hotkey-binding-service";
 import {
+  type HotkeyBindings,
   HotkeyManager,
   type HotkeyManagerDependencies,
   type ManagedHotkeyListener,
   type ManagedHotkeyListenerOptions,
 } from "../src/main/hotkey-manager";
+import { normalizeAccelerator } from "../src/main/hotkey-utils";
+import { acceleratorsEqual } from "../src/shared/hotkey-utils";
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -396,6 +400,11 @@ test("watchdog and final stop clean all owned state", async () => {
   expect(harness.manager.getState().destroyed).toBe(true);
   expect(harness.manager.getState().bindings.hold.listener).toBeNull();
   expect(harness.manager.getState().bindings.toggle.listener).toBeNull();
+
+  harness.manager.stop();
+  expect(harness.events).toEqual(["down", "up"]);
+  expect(harness.unregisteredFallbacks).toEqual(["F8"]);
+  expect(listenerFor(harness, "hold").stopCalls).toBe(1);
 });
 
 test("factory reset pauses during work and permanently stops before relaunch", async () => {
@@ -490,5 +499,201 @@ test("factory reset recovery logs resume failure without hiding the reset error"
   expect(harness.manager.getDesiredBindings()).toEqual({
     hold: "F7",
     toggle: "F8",
+  });
+});
+
+function createBindingServiceHarness(options?: {
+  register?: (bindings: HotkeyBindings) => Promise<void>;
+  acceleratorsEqual?: (a: string, b: string) => boolean;
+}) {
+  const persisted: { hold: string; toggle: string | null } = {
+    hold: "Control+Alt+Space",
+    toggle: "Control+Shift+Space",
+  };
+  const writes: Array<{ kind: "hold" | "toggle"; value: string | null }> = [];
+  const registrations: HotkeyBindings[] = [];
+  const recoveryLogs: string[] = [];
+  let paused = false;
+  let resumeCalls = 0;
+
+  const service = new HotkeyBindingService({
+    readPersistedBinding: (kind) => persisted[kind],
+    persistBinding: (kind, value) => {
+      writes.push({ kind, value });
+      if (kind === "hold") persisted.hold = value!;
+      else persisted.toggle = value;
+    },
+    registerBindings: async (bindings) => {
+      registrations.push({ ...bindings });
+      await options?.register?.(bindings);
+    },
+    resumeIfPaused: async () => {
+      if (paused) {
+        resumeCalls++;
+        paused = false;
+      }
+    },
+    validateAccelerator: (accelerator) => accelerator.includes("+"),
+    normalizeAccelerator,
+    acceleratorsEqual: options?.acceleratorsEqual ?? acceleratorsEqual,
+    defaultHold: "Control+Alt+Space",
+    logRecoveryFailure: (message) => recoveryLogs.push(message),
+  });
+
+  return {
+    service,
+    persisted,
+    writes,
+    registrations,
+    recoveryLogs,
+    setPaused: (value: boolean) => {
+      paused = value;
+    },
+    getResumeCalls: () => resumeCalls,
+  };
+}
+
+test("binding saves update one slot while preserving the opposite slot", async () => {
+  const harness = createBindingServiceHarness();
+
+  const hold = await harness.service.setBinding("hold", "Ctrl+Alt+Return");
+  expect(hold).toEqual({ ok: true, accelerator: "Control+Alt+Return" });
+  expect(harness.persisted).toEqual({
+    hold: "Control+Alt+Return",
+    toggle: "Control+Shift+Space",
+  });
+
+  const toggle = await harness.service.setBinding(
+    "toggle",
+    "Control+Shift+Return",
+  );
+  expect(toggle).toEqual({
+    ok: true,
+    accelerator: "Control+Shift+Return",
+  });
+  expect(harness.persisted).toEqual({
+    hold: "Control+Alt+Return",
+    toggle: "Control+Shift+Return",
+  });
+});
+
+test("binding saves clear toggle but reject clearing hold", async () => {
+  const harness = createBindingServiceHarness();
+
+  expect(await harness.service.setBinding("toggle", null)).toEqual({
+    ok: true,
+    accelerator: null,
+  });
+  expect(harness.persisted.toggle).toBeNull();
+
+  const writesBefore = harness.writes.length;
+  expect(await harness.service.setBinding("hold", null)).toEqual({
+    ok: false,
+    error: "hold_required",
+  });
+  expect(harness.writes).toHaveLength(writesBefore);
+  expect(harness.persisted.hold).toBe("Control+Alt+Space");
+});
+
+test("binding saves reject canonical duplicates in either direction", async () => {
+  const harness = createBindingServiceHarness();
+  harness.setPaused(true);
+
+  expect(await harness.service.setBinding("toggle", "Alt+Ctrl+Space")).toEqual({
+    ok: false,
+    conflictingKind: "hold",
+  });
+  expect(await harness.service.setBinding("hold", "Shift+Ctrl+Space")).toEqual({
+    ok: false,
+    conflictingKind: "toggle",
+  });
+  expect(harness.writes).toEqual([]);
+  expect(harness.registrations).toEqual([]);
+  expect(harness.getResumeCalls()).toBe(1);
+});
+
+test("failed runtime registration rolls persistence and runtime back", async () => {
+  let calls = 0;
+  const harness = createBindingServiceHarness({
+    register: async () => {
+      calls++;
+      if (calls === 1) throw new Error("registration failed");
+    },
+  });
+
+  expect(
+    await harness.service.setBinding("toggle", "Control+Shift+Return"),
+  ).toEqual({ ok: false, error: "save_failed" });
+  expect(harness.persisted).toEqual({
+    hold: "Control+Alt+Space",
+    toggle: "Control+Shift+Space",
+  });
+  expect(harness.registrations).toEqual([
+    {
+      hold: "Control+Alt+Space",
+      toggle: "Control+Shift+Return",
+    },
+    {
+      hold: "Control+Alt+Space",
+      toggle: "Control+Shift+Space",
+    },
+  ]);
+  expect(harness.recoveryLogs).toContain("Failed to save hotkey binding");
+});
+
+test("simultaneous binding saves are serialized", async () => {
+  const firstRegistration = new Deferred<void>();
+  let calls = 0;
+  const harness = createBindingServiceHarness({
+    register: async () => {
+      calls++;
+      if (calls === 1) await firstRegistration.promise;
+    },
+  });
+
+  const holdSave = harness.service.setBinding("hold", "Control+Alt+Return");
+  const toggleSave = harness.service.setBinding(
+    "toggle",
+    "Control+Shift+Return",
+  );
+  await expect.poll(() => harness.writes.length).toBe(1);
+  expect(harness.writes[0]).toEqual({
+    kind: "hold",
+    value: "Control+Alt+Return",
+  });
+
+  firstRegistration.resolve();
+  await expect(holdSave).resolves.toEqual({
+    ok: true,
+    accelerator: "Control+Alt+Return",
+  });
+  await expect(toggleSave).resolves.toEqual({
+    ok: true,
+    accelerator: "Control+Shift+Return",
+  });
+  expect(harness.registrations[1]).toEqual({
+    hold: "Control+Alt+Return",
+    toggle: "Control+Shift+Return",
+  });
+});
+
+test("an unexpectedly rejected save does not poison later serialized saves", async () => {
+  let comparisons = 0;
+  const harness = createBindingServiceHarness({
+    acceleratorsEqual: (a, b) => {
+      comparisons++;
+      if (comparisons === 1) throw new Error("unexpected comparison failure");
+      return acceleratorsEqual(a, b);
+    },
+  });
+
+  await expect(
+    harness.service.setBinding("hold", "Control+Alt+Return"),
+  ).rejects.toThrow("unexpected comparison failure");
+  await expect(
+    harness.service.setBinding("toggle", "Control+Shift+Return"),
+  ).resolves.toEqual({
+    ok: true,
+    accelerator: "Control+Shift+Return",
   });
 });
