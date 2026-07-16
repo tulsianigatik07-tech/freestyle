@@ -34,6 +34,27 @@ let _audioPlaybackMode: AudioPlaybackMode = "off";
 let _streamingAudioEnabled = false;
 let _toneCtx: AudioContext | null = null;
 
+/**
+ * Whether any loaded plugin implements `beforeOutput` (a suppression-capable
+ * output hook). Cached so the delivery hot path doesn't round-trip every time.
+ * Drives the fail-closed policy in `deliverFinal`: when a hook exists and the
+ * `/deliver` call fails, we must NOT paste the raw text (that would bypass a
+ * redaction/PII plugin). Assumed absent until proven present.
+ */
+let _beforeOutputHookPresent = false;
+
+async function refreshBeforeOutputHookPresence(): Promise<void> {
+  try {
+    const res = await getClient().api.output.hook.$get(
+      {},
+      { init: { signal: AbortSignal.timeout(3000) } },
+    );
+    if (res.ok) _beforeOutputHookPresent = (await res.json()).present;
+  } catch {
+    // Leave the last-known value; a stale "present" errs safe (fail closed).
+  }
+}
+
 function getToneCtx(): AudioContext {
   if (!_toneCtx || _toneCtx.state === "closed") _toneCtx = new AudioContext();
   return _toneCtx;
@@ -109,6 +130,13 @@ interface TranscribeResult {
   cloudAuthRequired?: boolean;
   usageExceeded?: boolean;
   providerCategory?: string;
+  /**
+   * Terminal pipeline disposition from the server. A plugin that called
+   * `api.control.consume()`/`abort()` in a server hook resolves to
+   * `"suppressed"`/`"aborted"` here, and the dictation is dropped without
+   * delivery. Defaults to `"deliver"` for older server responses.
+   */
+  disposition?: "deliver" | "suppressed" | "aborted";
 }
 
 const USAGE_LIMIT_DIALOG_TITLE = "Usage limit reached";
@@ -225,19 +253,26 @@ export default function AppPage(): React.JSX.Element {
         return;
       }
 
+      // A dictation is deliverable only when it has text AND the server
+      // didn't mark it suppressed/aborted (a plugin calling
+      // `api.control.consume()`/`abort()` in a server hook). Absent
+      // disposition (older responses) is treated as "deliver".
+      const isDeliverable = (r: TranscribeResult): boolean =>
+        !!r.raw.trim() && (r.disposition ?? "deliver") === "deliver";
+
       if (
         recordingActiveRef.current ||
         wantsMicRef.current ||
         queueRef.current.length > 0
       ) {
         const resolved = results
-          .filter((r) => r.raw.trim())
+          .filter(isDeliverable)
           .map((r) => ({ promise: Promise.resolve(r) }));
         queueRef.current = [...resolved, ...queueRef.current];
         return;
       }
 
-      const nonEmpty = results.filter((r) => r.raw.trim());
+      const nonEmpty = results.filter(isDeliverable);
       if (nonEmpty.length === 0) {
         if (results.some((r) => r.cloudAuthRequired)) {
           hidePill();
@@ -284,7 +319,13 @@ export default function AppPage(): React.JSX.Element {
           }
           if (res.ok) {
             const data = await res.json();
-            finalText = data.cleaned || combined;
+            // A plugin that consumed/aborted during the multi-segment merge
+            // suppresses delivery: keep the text empty so it's dropped below,
+            // rather than falling back to the combined raw.
+            finalText =
+              data.disposition && data.disposition !== "deliver"
+                ? ""
+                : data.cleaned || combined;
           } else if (res.status === 401) {
             const body = (await res.json().catch(() => null)) as {
               error?: string;
@@ -316,10 +357,59 @@ export default function AppPage(): React.JSX.Element {
       }
 
       try {
-        if (_outputMode === "clipboard") {
-          await window.api.copyText(finalText, appContextRef.current);
-        } else {
-          await window.api.pasteText(finalText, appContextRef.current);
+        const requestedMode =
+          _outputMode === "clipboard" ? "clipboard" : "paste";
+        let deliverText = finalText;
+        let deliverMode: "paste" | "clipboard" = requestedMode;
+        let shouldDeliver = true;
+
+        // Run the `beforeOutput` plugin hook server-side, on the final
+        // (post multi-segment-merge) text — this is the one point where the
+        // fully-assembled dictation is known, whether it came from a single
+        // chunk or several combined via `/api/post-process`.
+        //
+        // Fail-closed: if a `beforeOutput` hook exists (it may suppress/redact)
+        // and this call fails, we must NOT paste the raw text — dropping the
+        // dictation is safer than leaking un-redacted output. When no such hook
+        // is present, a transient failure falls back to delivering unchanged.
+        try {
+          const res = await getClient().api.output.deliver.$post({
+            json: {
+              text: finalText,
+              mode: requestedMode,
+              appContext: appContextRef.current,
+            },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            deliverText = data.output.text;
+            deliverMode =
+              data.output.mode === "clipboard" ? "clipboard" : "paste";
+            shouldDeliver = data.disposition === "deliver";
+            // The call succeeded, so the server's registry is reachable: refresh
+            // our cached hook-presence for the next (possibly failing) delivery.
+            void refreshBeforeOutputHookPresence();
+          } else if (_beforeOutputHookPresent) {
+            shouldDeliver = false;
+          }
+        } catch {
+          if (_beforeOutputHookPresent) {
+            // Fail closed: a suppression-capable hook exists but we couldn't run
+            // it. Drop delivery rather than risk leaking un-redacted text.
+            shouldDeliver = false;
+            console.warn(
+              "[pill] beforeOutput unreachable; suppressing delivery (fail-closed)",
+            );
+          }
+          // Otherwise best-effort — deliver the client-decided text/mode.
+        }
+
+        if (shouldDeliver && deliverText.trim()) {
+          if (deliverMode === "clipboard") {
+            await window.api.copyText(deliverText, appContextRef.current);
+          } else {
+            await window.api.pasteText(deliverText, appContextRef.current);
+          }
         }
       } catch (err) {
         console.error("[pill] paste/copy failed:", err);
@@ -1012,11 +1102,13 @@ export default function AppPage(): React.JSX.Element {
           raw?: string;
           cleaned?: string;
           provider_category?: string;
+          disposition?: "deliver" | "suppressed" | "aborted";
         };
         return {
           raw: (data.raw || "").trim(),
           cleaned: (data.cleaned || data.raw || "").trim(),
           providerCategory: data.provider_category,
+          disposition: data.disposition,
         };
       })
       .catch((err) => {
@@ -1114,6 +1206,9 @@ export default function AppPage(): React.JSX.Element {
       ?.getPillPosition()
       .then(applyPillPosition)
       .catch(() => {});
+    // Prime the `beforeOutput` hook-presence cache so the very first dictation's
+    // delivery already applies the correct fail-closed policy.
+    void refreshBeforeOutputHookPresence();
 
     // Listen for live changes from the settings UI
     const removePillPos = window.api?.onPillPositionChanged(applyPillPosition);
