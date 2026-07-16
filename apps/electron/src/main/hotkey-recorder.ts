@@ -1,6 +1,6 @@
 /**
  * Global hotkey rebinding — spawns a platform listener while the user picks a
- * new shortcut in Settings. Restores the recording IPC removed in #50.
+ * new shortcut in Settings.
  *
  * macOS: native binary (Fn / right modifiers) + renderer DOM (Alt+Space, etc.)
  * Windows / Linux: native binary in --record mode

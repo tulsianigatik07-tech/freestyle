@@ -2335,7 +2335,6 @@ app.whenReady().then(async () => {
     );
   });
 
-  // Register the independent hold and optional toggle hotkeys.
   scheduleHotkeyRegistration();
 
   // Start microphone activity monitoring
@@ -2702,7 +2701,6 @@ function scheduleHotkeyResume(): void {
   });
 }
 
-// Clean up hotkey and mic listeners on quit
 app.on("will-quit", () => {
   audioPlaybackController.restoreSync();
   stopLinuxPasteHelper();

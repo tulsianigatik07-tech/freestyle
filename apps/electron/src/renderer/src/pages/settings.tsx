@@ -681,7 +681,6 @@ export default function SettingsPage(): React.JSX.Element {
       .catch(() => {});
   }, []);
 
-  // Build display keys for current recorder state
   const liveKeys = liveModifiers.map(keyDisplayLabel);
   const draftKeys = capturedCombo ? comboDisplayKeys(capturedCombo) : liveKeys;
   const captureHint = needsModifierOrMouseButton
