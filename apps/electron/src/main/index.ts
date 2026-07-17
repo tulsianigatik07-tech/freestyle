@@ -56,9 +56,9 @@ import {
   startServer as startFreestyleServer,
   stopMlxServer,
   stopWhisperServer,
-  writeSetting,
 } from "@freestyle-voice/server";
 import { createAppLogger, enableFileLogging } from "@freestyle-voice/utils";
+import { serverUrlSchema } from "@freestyle-voice/validations";
 import {
   app,
   BrowserWindow,
@@ -83,6 +83,7 @@ import trayIconPath from "../../resources/tray/logoTemplate.png?asset";
 import { isActiveAudioPlaybackMode } from "../shared/audio-playback";
 import { getDefaultHotkey } from "../shared/hotkey-defaults";
 import type { OpenAppCandidate } from "../shared/open-apps";
+import { bearerAuthHeaders } from "../shared/server-auth";
 import { SETTINGS_KEYS } from "../shared/settings-keys";
 import { AudioPlaybackController } from "./audio-control/controller";
 import { recoverDuckedVolumeFromCrash } from "./audio-control/volume-ducker";
@@ -104,7 +105,7 @@ import {
   PipelineStage,
   relayEvent,
 } from "./plugins/index";
-import { initPluginUiHost } from "./plugins/ui-host";
+import { initPluginUiHost, invalidatePluginViews } from "./plugins/ui-host";
 
 const log = createAppLogger("electron");
 const hotkeyLog = createAppLogger("hotkey");
@@ -214,21 +215,78 @@ function writeSettings(patch: Record<string, unknown>): void {
 }
 
 /**
- * Base URL the app uses to reach the locally-run Freestyle server on the
- * resolved port. The DB lives behind the server, so all server-owned data
- * (settings, plugins) is read through it.
+ * The configured Freestyle server URL, if the user has set one. When present,
+ * the app talks to that server (for server-owned data: settings, history,
+ * plugins, transcription) instead of the locally-run one. Returns an empty
+ * string when using the default local server.
+ *
+ * The local server is always started regardless, so switching back to local
+ * (or between remotes) never requires a restart — see the startup block.
+ */
+function getServerUrl(): string {
+  const parsed = serverUrlSchema.safeParse(readSettings().serverUrl);
+  return parsed.success ? parsed.data : "";
+}
+
+/** Optional bearer token sent to a configured server ("" = none). */
+function getServerToken(): string {
+  const raw = readSettings().serverToken;
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
+/**
+ * Authorization headers for main-process API calls to a configured server.
+ * Empty when no token is set (the default local-server case), so loopback
+ * requests are unaffected.
+ */
+function getServerAuthHeaders(): Record<string, string> {
+  return bearerAuthHeaders(getServerToken());
+}
+
+/**
+ * Typed `hc` client bound to the current server target (local or configured
+ * remote) with auth headers — the main-process counterpart to the renderer's
+ * getClient(). Reads the target per call, so it always tracks the latest
+ * server:changed state without a restart.
+ */
+function serverClient() {
+  return hc<AppType>(getServerBaseUrl(), { headers: getServerAuthHeaders() });
+}
+
+/** Relay a main-process pipeline event to the current server target with auth. */
+function relayServerEvent(event: Parameters<typeof relayEvent>[1]): void {
+  relayEvent(getServerBaseUrl(), event, getServerAuthHeaders());
+}
+
+/**
+ * Base URL the app uses to reach the Freestyle server: the configured remote
+ * URL, or the locally-run server on the resolved port. The DB lives behind the
+ * server, so all server-owned data (settings, plugins) is read through it.
  */
 function getServerBaseUrl(): string {
-  return `http://127.0.0.1:${serverPort}`;
+  return getServerUrl() || `http://127.0.0.1:${serverPort}`;
+}
+
+/**
+ * Broadcast a server target change (URL/token) to all renderer windows so they
+ * re-point their API clients and refetch, without an app restart. Cached plugin
+ * views are dropped too, since they hold pages loaded from the previous origin.
+ */
+function broadcastServerChanged(): void {
+  mainWindow?.webContents.send("server:changed");
+  settingsWindow?.webContents.send("server:changed");
+  invalidatePluginViews();
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let httpServer: any = null;
-/** True when this process reuses another Freestyle server on the default port. */
-let reusingExternalServer = false;
 let serverPort = DEFAULT_PORT;
 let mainWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
+// In-flight settings-window creation. createSettingsWindow awaits an onboarding
+// probe before it assigns settingsWindow, so this serializes concurrent opens
+// to avoid spawning a second window during that gap.
+let settingsWindowCreating: Promise<void> | null = null;
 let tray: Tray | null = null;
 let keyListener: NativeKeyListener | null = null;
 // Latching flag: set only once the native key listener has started
@@ -542,7 +600,31 @@ function createAppWindow(): void {
   mainWindow.loadURL(getPillURL());
 }
 
-function createSettingsWindow(initialPath?: string): void {
+function createSettingsWindow(initialPath?: string): Promise<void> {
+  // Serialize concurrent opens: the first call owns creation, the rest await it.
+  if (settingsWindowCreating) return settingsWindowCreating;
+  if (settingsWindow) return Promise.resolve();
+  const creation = buildSettingsWindow(initialPath).finally(() => {
+    settingsWindowCreating = null;
+  });
+  settingsWindowCreating = creation;
+  return creation;
+}
+
+async function buildSettingsWindow(initialPath?: string): Promise<void> {
+  // Resolve the initial route BEFORE creating the window. The onboarding probe
+  // is an async server call; doing it first means there's no await gap between
+  // assigning `settingsWindow` and using it, so a close (or a concurrent open)
+  // during the probe can't null-deref or show a half-loaded window.
+  let onboardingDone = readSettings().onboardingComplete === true;
+  // Also consider onboarding done if the server reports any configured models
+  // (existing users who never went through onboarding). Read through the API
+  // rather than opening the SQLite file, so a configured remote server counts.
+  if (!onboardingDone && (await getConfiguredModelCount()) > 0) {
+    onboardingDone = true;
+  }
+  const startPath = !onboardingDone ? "/onboarding" : (initialPath ?? "/today");
+
   settingsWindow = new BrowserWindow({
     width: 1152,
     height: 648,
@@ -598,38 +680,16 @@ function createSettingsWindow(initialPath?: string): void {
     return { action: "deny" };
   });
 
-  // Check if onboarding is complete to decide initial route
-  let onboardingDone = readSettings().onboardingComplete === true;
-
-  // Also consider onboarding done if the DB has any configured models
-  // (existing users who never went through onboarding)
-  if (!onboardingDone) {
-    try {
-      const dbPath = process.env.FREESTYLE_DB_PATH;
-      if (dbPath) {
-        const { DatabaseSync } = require("node:sqlite");
-        const db = new DatabaseSync(dbPath);
-        const row = db
-          .prepare("SELECT COUNT(*) as count FROM model_configs")
-          .get() as { count: number } | undefined;
-        db.close();
-        if (row && row.count > 0) onboardingDone = true;
-      }
-    } catch {
-      // DB may not exist yet -- that's fine, show onboarding
-    }
-  }
-
   // Wire the plugin UI host (view manager + host-action/view IPC) to this
   // window. Discovery, install, and asset serving all live server-side now;
   // the renderer talks to the server directly for those.
   initPluginUiHost({
     window: settingsWindow,
     getServerBaseUrl,
+    getServerToken,
     onAction: handlePluginAction,
   });
 
-  const startPath = !onboardingDone ? "/onboarding" : (initialPath ?? "/today");
   settingsWindow.loadURL(getDashboardURL(startPath));
 }
 
@@ -1121,7 +1181,7 @@ async function deliverOutput(
   mode: typeof OutputMode.Paste | typeof OutputMode.Clipboard,
 ): Promise<void> {
   if (!text.trim()) {
-    relayEvent(getServerBaseUrl(), {
+    relayServerEvent({
       type: FreestyleEventType.OutputDelivered,
       text,
       mode: OutputMode.None,
@@ -1142,7 +1202,7 @@ async function deliverOutput(
     // pasteIntoFocusedApp left the transcript on the clipboard — tell the user
     // instead of letting the dictation silently vanish.
     notifyPasteFailed();
-    relayEvent(getServerBaseUrl(), {
+    relayServerEvent({
       type: FreestyleEventType.PipelineError,
       stage: PipelineStage.Output,
       message: err instanceof Error ? err.message : String(err),
@@ -1150,7 +1210,7 @@ async function deliverOutput(
     throw err;
   }
 
-  relayEvent(getServerBaseUrl(), {
+  relayServerEvent({
     type: FreestyleEventType.OutputDelivered,
     text,
     mode,
@@ -1162,11 +1222,15 @@ function resetOnboarding(): void {
   showSettingsWindow("/onboarding");
 }
 
+// Per-request timeout for main-process API calls to the server.
 const SERVER_SETTING_TIMEOUT_MS = 5000;
+// How long boot waits for the server to answer before registering the hotkey
+// with whatever it can read (falling back to the default accelerator).
+const SERVER_READY_TIMEOUT_MS = 5000;
 
 async function putServerSetting(key: string, value: string): Promise<boolean> {
   try {
-    const res = await hc<AppType>(getServerBaseUrl()).api.settings[":key"].$put(
+    const res = await serverClient().api.settings[":key"].$put(
       { param: { key }, json: { value } },
       { init: { signal: AbortSignal.timeout(SERVER_SETTING_TIMEOUT_MS) } },
     );
@@ -1175,6 +1239,82 @@ async function putServerSetting(key: string, value: string): Promise<boolean> {
     log.warn(`Failed to save setting "${key}":`, err);
     return false;
   }
+}
+
+/**
+ * Read all server-owned settings in one request. Returns `null` when the server
+ * is unreachable — distinct from an empty map (server reachable, nothing
+ * stored) so callers don't mistake a network blip for "unset" and clobber
+ * last-known-good values (e.g. reverting the hotkey mode to its default).
+ *
+ * All server-owned state (settings, models, history, plugins) lives behind the
+ * server — local or a configured remote — so the main process reads it through
+ * the API rather than opening the SQLite file directly. This keeps a single
+ * source of truth and makes a configured remote server behave identically.
+ */
+async function getServerSettings(): Promise<Record<string, string> | null> {
+  try {
+    const res = await serverClient().api.settings.$get(
+      {},
+      { init: { signal: AbortSignal.timeout(SERVER_SETTING_TIMEOUT_MS) } },
+    );
+    if (!res.ok) return null;
+    return (await res.json()) as Record<string, string>;
+  } catch {
+    return null;
+  }
+}
+
+/** Number of configured models behind the current server (0 when unreachable). */
+async function getConfiguredModelCount(): Promise<number> {
+  try {
+    const res = await serverClient().api.models.configured.$get(
+      {},
+      { init: { signal: AbortSignal.timeout(SERVER_SETTING_TIMEOUT_MS) } },
+    );
+    if (!res.ok) return 0;
+    const data = (await res.json()) as unknown[];
+    return Array.isArray(data) ? data.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Probe `/api/health` at `baseUrl` and confirm it's actually a Freestyle server
+ * (not some other service that happens to hold the port). Returns false on any
+ * network error or non-matching identity.
+ */
+async function probeServerHealth(
+  baseUrl: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  try {
+    const res = await net.fetch(`${baseUrl}/api/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as { status?: string; name?: string };
+    return data.status === "ok" && data.name === "freestyle";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve once the current server target answers `/api/health`, or after
+ * `timeoutMs`. Used at boot before the first settings read, since the local
+ * server starts asynchronously (fire-and-forget) and may not be listening yet.
+ */
+async function waitForServerReady(
+  timeoutMs = SERVER_READY_TIMEOUT_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await probeServerHealth(getServerBaseUrl(), 1000)) return true;
+    await wait(150);
+  }
+  return false;
 }
 
 // Dev-only: reset every sector tone to off and cleanup intensity to medium.
@@ -1187,28 +1327,18 @@ async function resetToneConfiguration(): Promise<void> {
     [SETTINGS_KEYS.cleanupIntensity, "medium"],
   ];
 
-  if (reusingExternalServer) {
-    const results = await Promise.all(
-      resets.map(([key, value]) => putServerSetting(key, value)),
-    );
-    if (results.some((ok) => !ok)) {
-      log.warn(
-        "Reset tone configuration failed: one or more settings rejected",
-      );
-    }
-  } else {
-    for (const [key, value] of resets) {
-      try {
-        writeSetting(key, value);
-      } catch (err) {
-        log.warn(`Reset tone configuration failed for "${key}":`, err);
-      }
-    }
+  // Always write through the server so the values land in the DB the app reads
+  // from — local or a configured remote.
+  const results = await Promise.all(
+    resets.map(([key, value]) => putServerSetting(key, value)),
+  );
+  if (results.some((ok) => !ok)) {
+    log.warn("Reset tone configuration failed: one or more settings rejected");
   }
 
   const tonePath = "/settings/tone";
   if (!settingsWindow) {
-    createSettingsWindow(tonePath);
+    void createSettingsWindow(tonePath);
     return;
   }
 
@@ -1299,7 +1429,7 @@ async function factoryReset(): Promise<void> {
 
 function showSettingsWindow(path?: string): void {
   if (!settingsWindow) {
-    createSettingsWindow(path);
+    void createSettingsWindow(path);
     return;
   }
   if (path) {
@@ -1672,19 +1802,45 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on("recording:committed", () => {
-    relayEvent(getServerBaseUrl(), {
+    relayServerEvent({
       type: FreestyleEventType.RecordingCommitted,
     });
   });
 
   ipcMain.on("recording:cancelled", () => {
-    relayEvent(getServerBaseUrl(), {
+    relayServerEvent({
       type: FreestyleEventType.RecordingCancelled,
     });
   });
 
   // IPC: expose the server port to the renderer
   ipcMain.handle("server:port", () => serverPort);
+
+  // IPC: read the configured server URL ("" = use the local server).
+  ipcMain.handle("server:url", () => getServerUrl());
+
+  // IPC: persist the server URL. The local server keeps running regardless, so
+  // switching between local and a configured URL takes effect immediately —
+  // renderers re-point their clients on the "server:changed" broadcast and on
+  // the next transcription's refreshApiBase(). Invalid values are ignored.
+  ipcMain.handle("server:set-url", (_event, url: unknown) => {
+    const parsed = serverUrlSchema.safeParse(url);
+    if (parsed.success) {
+      writeSettings({ serverUrl: parsed.data });
+      broadcastServerChanged();
+    }
+    return getServerUrl();
+  });
+
+  // IPC: read/persist the optional bearer token for a configured server.
+  ipcMain.handle("server:token", () => getServerToken());
+  ipcMain.handle("server:set-token", (_event, token: unknown) => {
+    writeSettings({
+      serverToken: typeof token === "string" ? token.trim() : "",
+    });
+    broadcastServerChanged();
+    return getServerToken();
+  });
 
   // IPC: reveal the diagnostic log folder so users can share freestyle.log.
   ipcMain.handle("logs:open-folder", async () => {
@@ -1901,23 +2057,16 @@ app.whenReady().then(async () => {
       });
   };
 
-  // Check if a Freestyle server is already running on the default port.
-  let existingServer = false;
-  try {
-    // Bound this probe: a normal cold start fast-fails with ECONNREFUSED, but
-    // without a timeout a half-open socket on the port could hang window/tray
-    // creation indefinitely.
-    const res = await net.fetch(`http://127.0.0.1:${DEFAULT_PORT}/api/health`, {
-      signal: AbortSignal.timeout(1500),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { status?: string; name?: string };
-      existingServer = data?.status === "ok" && data?.name === "freestyle";
-    }
-  } catch {}
+  // Check if a Freestyle server is already running on the default port. The
+  // 1.5s bound matters: a normal cold start fast-fails with ECONNREFUSED, but
+  // without a timeout a half-open socket on the port could hang window/tray
+  // creation indefinitely.
+  const existingServer = await probeServerHealth(
+    `http://127.0.0.1:${DEFAULT_PORT}`,
+    1500,
+  );
 
   if (existingServer) {
-    reusingExternalServer = true;
     serverPort = DEFAULT_PORT;
     log.info(
       `Reusing existing Freestyle server on http://localhost:${DEFAULT_PORT}`,
@@ -2212,9 +2361,25 @@ app.whenReady().then(async () => {
     );
   });
 
-  // Register hold-to-record hotkey via native platform binary
-  hotkeyActivationMode = loadHotkeyModeFromDB();
-  scheduleHotkeyRegistration();
+  // Register the hold-to-record hotkey immediately with the default accelerator
+  // so a press right after launch is never dropped. Pass DEFAULT_HOTKEY
+  // explicitly so this doesn't fire a settings request at the not-yet-ready
+  // server. Once the server answers, re-register with the configured
+  // accelerator + activation mode (only if they differ, to avoid a needless
+  // native-listener rebuild).
+  scheduleHotkeyRegistration(DEFAULT_HOTKEY);
+  void waitForServerReady().then(async () => {
+    // One request for both keys, instead of a read per key. Skip if the server
+    // never answered — the default registered above stands.
+    const settings = await getServerSettings();
+    if (!settings) return;
+    hotkeyActivationMode = hotkeyModeFromSettings(settings);
+    const configured = hotkeyFromSettings(settings);
+    const accel = configured
+      ? normalizeAccelerator(configured)
+      : DEFAULT_HOTKEY;
+    if (accel !== currentHotkeyAccel) scheduleHotkeyRegistration(configured);
+  });
 
   // Start microphone activity monitoring
   micListener = new MicListener({
@@ -2232,8 +2397,15 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on("hotkey:reload", () => {
-    hotkeyActivationMode = loadHotkeyModeFromDB();
-    scheduleHotkeyRegistration(currentHotkeyAccel ?? undefined);
+    void getServerSettings().then((settings) => {
+      // Server unreachable — keep last-known-good mode/hotkey rather than
+      // silently reverting to defaults on a transient blip.
+      if (!settings) return;
+      hotkeyActivationMode = hotkeyModeFromSettings(settings);
+      scheduleHotkeyRegistration(
+        hotkeyFromSettings(settings) ?? currentHotkeyAccel ?? undefined,
+      );
+    });
   });
 
   ipcMain.on("hotkey:set-mode", (_event, mode: string) => {
@@ -2294,47 +2466,24 @@ function isValidAccelerator(accel: string): boolean {
   );
 }
 
-function loadHotkeyFromDB(): string | undefined {
-  try {
-    const dbPath = process.env.FREESTYLE_DB_PATH;
-    if (dbPath) {
-      const { DatabaseSync } = require("node:sqlite");
-      const db = new DatabaseSync(dbPath);
-      const row = db
-        .prepare("SELECT value FROM settings WHERE key = ?")
-        .get(SETTINGS_KEYS.hotkey) as { value: string } | undefined;
-      db.close();
-      if (row?.value && isValidAccelerator(row.value)) {
-        return row.value;
-      }
-    }
-  } catch {
-    // Ignore errors
-  }
-  return undefined;
+/** The configured hotkey accelerator from a settings map, if valid. */
+function hotkeyFromSettings(
+  settings: Record<string, string>,
+): string | undefined {
+  const value = settings[SETTINGS_KEYS.hotkey];
+  return value && isValidAccelerator(value) ? value : undefined;
 }
 
-function loadHotkeyModeFromDB(): "hold" | "toggle" {
-  try {
-    const dbPath = process.env.FREESTYLE_DB_PATH;
-    if (dbPath) {
-      const { DatabaseSync } = require("node:sqlite");
-      const db = new DatabaseSync(dbPath);
-      const row = db
-        .prepare("SELECT value FROM settings WHERE key = ?")
-        .get(SETTINGS_KEYS.hotkeyMode) as { value: string } | undefined;
-      db.close();
-      if (row?.value === "toggle") return "toggle";
-    }
-  } catch {
-    // Ignore errors
-  }
-  return "hold";
+/** The hotkey activation mode from a settings map (defaults to "hold"). */
+function hotkeyModeFromSettings(
+  settings: Record<string, string>,
+): "hold" | "toggle" {
+  return settings[SETTINGS_KEYS.hotkeyMode] === "toggle" ? "toggle" : "hold";
 }
 
 function sendHotkeyDown(): void {
   showPill();
-  relayEvent(getServerBaseUrl(), { type: FreestyleEventType.RecordingStarted });
+  relayServerEvent({ type: FreestyleEventType.RecordingStarted });
   if (pillReadyPromise) {
     // The pill window is still loading — defer IPC until it can receive it.
     void pillReadyPromise.then(() => {
@@ -2520,7 +2669,9 @@ async function registerHotkey(hotkey?: string): Promise<void> {
     globalShortcut.unregisterAll();
 
     if (!hotkey) {
-      hotkey = loadHotkeyFromDB();
+      // Unreachable server yields no map; registration falls back to the
+      // default accelerator below.
+      hotkey = hotkeyFromSettings((await getServerSettings()) ?? {});
     }
 
     const normalized =

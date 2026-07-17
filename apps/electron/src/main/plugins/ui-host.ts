@@ -13,8 +13,10 @@ const log = createAppLogger("plugins-ui");
 export interface PluginUiHostDeps {
   /** The dashboard window the plugin views overlay. */
   window: BrowserWindow;
-  /** Resolve the loopback server base URL that serves plugin UI + API. */
+  /** Resolve the server base URL that serves plugin UI + API (local or remote). */
   getServerBaseUrl: () => string;
+  /** Bearer token for a configured server ("" = local server / no auth). */
+  getServerToken: () => string;
   /** Perform a host action requested by a plugin page. */
   onAction: <C extends keyof HostActions>(
     channel: C,
@@ -38,10 +40,17 @@ let ipcRegistered = false;
 export function initPluginUiHost(deps: PluginUiHostDeps): void {
   currentDeps = deps;
 
-  viewManager = new PluginViewManager(
-    pluginBridgePreloadPath(),
-    deps.getServerBaseUrl,
-  );
+  // Reuse a single manager across window re-opens: its session request filters
+  // are installed per persistent partition, so a fresh instance each time would
+  // orphan the old filter closures (Electron keeps only the last one) and make
+  // the manager's "already installed" bookkeeping lie. Only the window changes.
+  if (!viewManager) {
+    viewManager = new PluginViewManager(
+      pluginBridgePreloadPath(),
+      deps.getServerBaseUrl,
+      deps.getServerToken,
+    );
+  }
   viewManager.attachWindow(deps.window);
 
   if (ipcRegistered) return;
@@ -94,4 +103,14 @@ export function initPluginUiHost(deps: PluginUiHostDeps): void {
       }
     },
   );
+}
+
+/**
+ * Discard all cached plugin views. Call when the server target (URL/token)
+ * changes: cached views hold pages loaded from the previous origin, so they'd
+ * otherwise serve stale content and miss the new origin's auth-header injection.
+ * The next open reloads from the current server.
+ */
+export function invalidatePluginViews(): void {
+  viewManager?.invalidate();
 }

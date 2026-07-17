@@ -11,5 +11,6 @@ export * from "./openai-stt.js";
 export * from "./plugins.js";
 export * from "./post-process.js";
 export * from "./query.js";
+export * from "./server.js";
 export * from "./settings.js";
 export * from "./vocabulary.js";

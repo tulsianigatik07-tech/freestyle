@@ -1,6 +1,13 @@
 import { Orb } from "@renderer/components/ui/orb";
 import { capture } from "@renderer/lib/analytics";
-import { getApiBase, getClient, refreshApiBase } from "@renderer/lib/api";
+import {
+  apiFetch,
+  getApiBase,
+  getClient,
+  getServerToken,
+  isRemoteServer,
+  refreshApiBase,
+} from "@renderer/lib/api";
 import {
   applyNeedsAppContextForCleanup,
   refreshNeedsAppContextForCleanup,
@@ -468,7 +475,7 @@ export default function AppPage(): React.JSX.Element {
         headers["x-app-context"] = encodeAppContext(appContextRef.current);
       if (queueRef.current.length > 0 || drainingRef.current)
         headers["x-skip-post-process"] = "true";
-      return fetch(`${getApiBase()}/api/transcribe`, {
+      return apiFetch("/api/transcribe", {
         method: "POST",
         body: wavBlob,
         headers,
@@ -516,7 +523,7 @@ export default function AppPage(): React.JSX.Element {
   // biome-ignore lint/correctness/useExhaustiveDependencies: singleton
   const getStreamer = useCallback((): Streamer => {
     if (!streamerRef.current) {
-      streamerRef.current = new Streamer(getApiBase(), {
+      streamerRef.current = new Streamer(getApiBase(), getServerToken(), {
         onConfig: (config) => {
           supportsSessionTransportRef.current = config.sessionTransport;
           if (config.providerCategory) {
@@ -1060,14 +1067,16 @@ export default function AppPage(): React.JSX.Element {
       hidePill();
       window.api.showErrorDialog(
         "Server Unreachable",
-        `Cannot reach Freestyle server at ${getApiBase()}. Quit and reopen the app.`,
+        isRemoteServer()
+          ? `Cannot reach the server at ${getApiBase()}. Check the server URL in Settings → Network, or reset to the local server.`
+          : `Cannot reach Freestyle server at ${getApiBase()}. Quit and reopen the app.`,
       );
       return;
     }
 
     setPendingCount((c) => c + 1);
-    const transcribePromise: Promise<TranscribeResult> = fetch(
-      `${getApiBase()}/api/transcribe`,
+    const transcribePromise: Promise<TranscribeResult> = apiFetch(
+      "/api/transcribe",
       { method: "POST", body: wavBlob, headers },
     )
       .then(async (res) => {
@@ -1115,7 +1124,9 @@ export default function AppPage(): React.JSX.Element {
         const msg = err instanceof Error ? err.message : "Transcription failed";
         const hint =
           msg.includes("fetch") || msg.includes("Failed")
-            ? ` (${getApiBase()} unreachable — quit and reopen the app)`
+            ? isRemoteServer()
+              ? ` (${getApiBase()} unreachable — check Settings → Network)`
+              : ` (${getApiBase()} unreachable — quit and reopen the app)`
             : "";
         return { raw: "", cleaned: "", error: `${msg}${hint}` };
       })
@@ -1239,12 +1250,25 @@ export default function AppPage(): React.JSX.Element {
         }
       },
     );
+    // The server target (URL/token) changed in Settings. Re-point this window's
+    // API client and tear down the streamer so its next connection uses the new
+    // server — no app restart needed. A fresh streamer is created lazily on the
+    // next recording (or immediately if streaming is enabled).
+    const removeServerChanged = window.api?.onServerChanged(() => {
+      void refreshApiBase().finally(() => {
+        streamerRef.current?.destroy();
+        streamerRef.current = null;
+        supportsSessionTransportRef.current = false;
+        if (_streamingAudioEnabled) getStreamer();
+      });
+    });
     return () => {
       removePillPos?.();
       removeOutputMode?.();
       removeAudioDucking?.();
       removeAudioPlaybackMode?.();
       removeStreamingAudio?.();
+      removeServerChanged?.();
     };
   }, [applyPillPosition]);
 
