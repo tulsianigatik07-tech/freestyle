@@ -12,11 +12,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SETTINGS_KEYS } from "../../../../shared/settings-keys";
 import { DEFAULT_MLX_KEEP_ALIVE_MINUTES } from "./constants";
 import type { ApiKeyEntry, ConfiguredModel } from "./types";
+import type {
+  EndpointConnectConfig,
+  EndpointConnectState,
+} from "./use-endpoint-connect";
+import { useEndpointConnect } from "./use-endpoint-connect";
 import {
   buildSettingsVoiceItems,
   clampMlxKeepAliveMinutes,
   groupByProvider,
 } from "./utils";
+
+export type { EndpointConnectState } from "./use-endpoint-connect";
 
 // Query keys for the models page. `["models", ...]` is a family so a single
 // invalidate refreshes both available + configured.
@@ -42,32 +49,6 @@ function hasActiveDownload(
   return !!models?.some(
     (m) => m.status === "downloading" || m.status === "verifying",
   );
-}
-
-export interface LocalLlmState {
-  url: string;
-  setUrl: (v: string) => void;
-  apiKey: string;
-  setApiKey: (v: string) => void;
-  testing: boolean;
-  connected: boolean | null;
-  error: string | null;
-  models: string[];
-  test: () => Promise<void>;
-  clearStatus: () => void;
-}
-
-export interface OpenaiSttState {
-  url: string;
-  setUrl: (v: string) => void;
-  apiKey: string;
-  setApiKey: (v: string) => void;
-  testing: boolean;
-  connected: boolean | null;
-  error: string | null;
-  models: string[];
-  test: () => Promise<void>;
-  clearStatus: () => void;
 }
 
 export interface UseModels {
@@ -97,8 +78,8 @@ export interface UseModels {
     { providerName: string; models: AvailableModel[] }
   >;
 
-  localLlm: LocalLlmState;
-  openaiStt: OpenaiSttState;
+  localLlm: EndpointConnectState;
+  openaiStt: EndpointConnectState;
 
   // Actions — each refetches as needed
   configureModel: (
@@ -121,6 +102,29 @@ export interface UseModels {
   deleteProvider: (provider: string) => Promise<void>;
   reload: () => Promise<void>;
 }
+
+// ---------------------------------------------------------------------------
+// Endpoint connect configs — static, defined once at module level so the
+// probe callback references are stable across renders.
+// ---------------------------------------------------------------------------
+
+const LOCAL_LLM_CONFIG: EndpointConnectConfig = {
+  urlKey: SETTINGS_KEYS.localLlmUrl,
+  apiKeyKey: SETTINGS_KEYS.localLlmApiKey,
+  defaultUrl: "http://localhost:11434",
+  clearUrlWhenEmpty: false,
+  probe: (client, body) =>
+    client.api.settings["local-llm"].test.$post({ json: body }),
+};
+
+const OPENAI_STT_CONFIG: EndpointConnectConfig = {
+  urlKey: SETTINGS_KEYS.openaiSttBaseUrl,
+  apiKeyKey: SETTINGS_KEYS.openaiSttApiKey,
+  defaultUrl: "",
+  clearUrlWhenEmpty: true,
+  probe: (client, body) =>
+    client.api.settings["openai-stt"].test.$post({ json: body }),
+};
 
 export function useModels(): UseModels {
   const queryClient = useQueryClient();
@@ -218,22 +222,6 @@ export function useModels(): UseModels {
     new Set(),
   );
 
-  // Local LLM (Ollama / LM Studio) connection — simplified inline form state.
-  const [localUrl, setLocalUrl] = useState("http://localhost:11434");
-  const [localApiKey, setLocalApiKey] = useState("");
-  const [localTesting, setLocalTesting] = useState(false);
-  const [localConnected, setLocalConnected] = useState<boolean | null>(null);
-  const [localError, setLocalError] = useState<string | null>(null);
-  const [localModels, setLocalModels] = useState<string[]>([]);
-
-  // Custom OpenAI-compatible STT endpoint — same inline form pattern as local LLM.
-  const [sttUrl, setSttUrl] = useState("");
-  const [sttApiKey, setSttApiKey] = useState("");
-  const [sttTesting, setSttTesting] = useState(false);
-  const [sttConnected, setSttConnected] = useState<boolean | null>(null);
-  const [sttError, setSttError] = useState<string | null>(null);
-  const [sttModels, setSttModels] = useState<string[]>([]);
-
   // Seed editable state from persisted settings once, when the settings query
   // first resolves. Mutations update this local state directly, so we don't
   // re-seed on later invalidations (which would clobber in-progress edits).
@@ -249,12 +237,6 @@ export function useModels(): UseModels {
     setSettingsSeeded(true);
     const cleanup = s[SETTINGS_KEYS.llmCleanup];
     if (cleanup) setLlmCleanup(cleanup === "true");
-    const url = s[SETTINGS_KEYS.localLlmUrl];
-    if (url) setLocalUrl(url);
-    const key = s[SETTINGS_KEYS.localLlmApiKey];
-    if (key) setLocalApiKey(key);
-    setSttUrl(s[SETTINGS_KEYS.openaiSttBaseUrl] ?? "");
-    setSttApiKey(s[SETTINGS_KEYS.openaiSttApiKey] ?? "");
     const rawMinutes = s[SETTINGS_KEYS.mlxAsrKeepAliveMinutes];
     if (rawMinutes) {
       const minutes = Number(rawMinutes);
@@ -287,6 +269,21 @@ export function useModels(): UseModels {
     ]);
   }, [queryClient]);
   const loadData = reload;
+
+  // -------------------------------------------------------------------------
+  // Endpoint connections (local LLM + custom STT)
+  // -------------------------------------------------------------------------
+
+  const localLlm = useEndpointConnect(
+    LOCAL_LLM_CONFIG,
+    settingsQuery.data,
+    loadData,
+  );
+  const openaiStt = useEndpointConnect(
+    OPENAI_STT_CONFIG,
+    settingsQuery.data,
+    loadData,
+  );
 
   const loadWhisperStatus = useCallback(
     () => queryClient.invalidateQueries({ queryKey: MODELS_KEYS.whisper }),
@@ -594,140 +591,6 @@ export function useModels(): UseModels {
     [configured, loadData],
   );
 
-  // -------------------------------------------------------------------------
-  // Local LLM connection test
-  // -------------------------------------------------------------------------
-
-  const clearLocalStatus = useCallback(() => {
-    setLocalConnected(null);
-    setLocalError(null);
-  }, []);
-
-  const testLocalLlm = useCallback(async () => {
-    setLocalTesting(true);
-    setLocalConnected(null);
-    setLocalError(null);
-    try {
-      const url = localUrl.replace(/\/+$/, "");
-      const key = localApiKey.trim();
-      const client = getClient();
-      await Promise.all([
-        client.api.settings[":key"].$put({
-          param: { key: SETTINGS_KEYS.localLlmUrl },
-          json: { value: url },
-        }),
-        key
-          ? client.api.settings[":key"].$put({
-              param: { key: SETTINGS_KEYS.localLlmApiKey },
-              json: { value: key },
-            })
-          : client.api.settings[":key"].$delete({
-              param: { key: SETTINGS_KEYS.localLlmApiKey },
-            }),
-      ]);
-
-      const res = await client.api.settings["local-llm"].test.$post({
-        json: { url, api_key: key || undefined },
-      });
-
-      if (res.ok) {
-        const result = await res.json();
-        if ("ok" in result && result.ok) {
-          setLocalConnected(true);
-          setLocalModels(result.models ?? []);
-          await loadData();
-          return;
-        }
-        setLocalConnected(false);
-        setLocalError(
-          "error" in result && typeof result.error === "string"
-            ? result.error
-            : "Connection failed",
-        );
-        return;
-      }
-      setLocalConnected(false);
-      setLocalError(`HTTP ${res.status}`);
-    } catch (err) {
-      setLocalConnected(false);
-      setLocalError(err instanceof Error ? err.message : "Connection failed");
-    } finally {
-      setLocalTesting(false);
-    }
-  }, [localUrl, localApiKey, loadData]);
-
-  // -------------------------------------------------------------------------
-  // Custom OpenAI-compatible STT endpoint test
-  // -------------------------------------------------------------------------
-
-  const clearSttStatus = useCallback(() => {
-    setSttConnected(null);
-    setSttError(null);
-  }, []);
-
-  const testOpenaiStt = useCallback(async () => {
-    setSttTesting(true);
-    setSttConnected(null);
-    setSttError(null);
-    try {
-      const url = sttUrl.replace(/\/+$/, "");
-      const key = sttApiKey.trim();
-      const client = getClient();
-      await Promise.all([
-        url
-          ? client.api.settings[":key"].$put({
-              param: { key: SETTINGS_KEYS.openaiSttBaseUrl },
-              json: { value: url },
-            })
-          : client.api.settings[":key"].$delete({
-              param: { key: SETTINGS_KEYS.openaiSttBaseUrl },
-            }),
-        key
-          ? client.api.settings[":key"].$put({
-              param: { key: SETTINGS_KEYS.openaiSttApiKey },
-              json: { value: key },
-            })
-          : client.api.settings[":key"].$delete({
-              param: { key: SETTINGS_KEYS.openaiSttApiKey },
-            }),
-      ]);
-
-      if (!url) {
-        setSttConnected(null);
-        await loadData();
-        return;
-      }
-
-      const res = await client.api.settings["openai-stt"].test.$post({
-        json: { url, api_key: key || undefined },
-      });
-
-      if (res.ok) {
-        const result = await res.json();
-        if ("ok" in result && result.ok) {
-          setSttConnected(true);
-          setSttModels(result.models ?? []);
-          await loadData();
-          return;
-        }
-        setSttConnected(false);
-        setSttError(
-          "error" in result && typeof result.error === "string"
-            ? result.error
-            : "Connection failed",
-        );
-        return;
-      }
-      setSttConnected(false);
-      setSttError(`HTTP ${res.status}`);
-    } catch (err) {
-      setSttConnected(false);
-      setSttError(err instanceof Error ? err.message : "Connection failed");
-    } finally {
-      setSttTesting(false);
-    }
-  }, [sttUrl, sttApiKey, loadData]);
-
   return {
     loading,
     available,
@@ -745,30 +608,8 @@ export function useModels(): UseModels {
     defaultLlm,
     voiceItems,
     llmModelsByProvider,
-    localLlm: {
-      url: localUrl,
-      setUrl: setLocalUrl,
-      apiKey: localApiKey,
-      setApiKey: setLocalApiKey,
-      testing: localTesting,
-      connected: localConnected,
-      error: localError,
-      models: localModels,
-      test: testLocalLlm,
-      clearStatus: clearLocalStatus,
-    },
-    openaiStt: {
-      url: sttUrl,
-      setUrl: setSttUrl,
-      apiKey: sttApiKey,
-      setApiKey: setSttApiKey,
-      testing: sttTesting,
-      connected: sttConnected,
-      error: sttError,
-      models: sttModels,
-      test: testOpenaiStt,
-      clearStatus: clearSttStatus,
-    },
+    localLlm,
+    openaiStt,
     configureModel,
     saveKey,
     selectLocalVoice,
