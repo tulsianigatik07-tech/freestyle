@@ -16,6 +16,7 @@ import {
   parseAppContext,
   plugins,
 } from "../lib/plugins/index.js";
+import { createHookApi } from "../lib/plugins/pipeline.js";
 import {
   applyFinalRewrites,
   getCleanupAppAssignments,
@@ -235,13 +236,13 @@ const stream = new Hono().get(
       };
     }
 
-    function connectUpstream(
+    async function connectUpstream(
       ws: {
         send: (data: string) => void;
         close: () => void;
       },
       announced?: AnnouncedStreamConfig,
-    ): void {
+    ): Promise<void> {
       const resolved = announced ?? announceConfig(ws);
       if (!resolved) return;
 
@@ -274,12 +275,50 @@ const stream = new Hono().get(
       // cleanup settings in the streaming payload — matching the batch
       // `/v2/transcribe` path. When cleanup is disabled, `skipPostProcess`
       // tells the cloud to return the raw transcript (and bill accordingly).
+      //
+      // Run `beforeCleanup` locally to collect plugin system-prompt fragments,
+      // then include them in the cleanup config so the cloud appends them to
+      // its assembled prompt. `input.text` is empty (the transcript hasn't been
+      // produced yet); plugins that contribute static fragments work fine.
+      //
+      // The hook can also decide to skip cleanup outright (`skip` or a
+      // `consume()`/`abort()`). Streaming has no local cleanup path, so the
+      // only way to honor that is to tell the cloud to skip post-processing
+      // (`skipPostProcess`) and return the raw transcript. Fragments are only
+      // meaningful when cleanup actually runs, so a skip drops them too.
+      let systemFragments: string[] | undefined;
+      let pluginSkipsCleanup = false;
+      if (
+        voice.provider === FREESTYLE_CLOUD_PROVIDER_ID &&
+        isLlmCleanupEnabled() &&
+        plugins().has("beforeCleanup")
+      ) {
+        const hookApi = await createHookApi();
+        const parsedCtx = parseAppContext(effectiveAppContext());
+        const { destination } = getRewritePromptContext(
+          effectiveAppContext(),
+          getCleanupAppAssignments(),
+        );
+        const promptHook = await plugins().run(
+          "beforeCleanup",
+          { text: "", appContext: parsedCtx, destination },
+          { system: [] as string[] },
+          hookApi,
+        );
+        pluginSkipsCleanup =
+          promptHook.skip === true || hookApi.control.state !== "running";
+        if (!pluginSkipsCleanup && promptHook.system.length > 0) {
+          systemFragments = promptHook.system;
+        }
+      }
+
       const cleanup =
         voice.provider === FREESTYLE_CLOUD_PROVIDER_ID
           ? {
-              skipPostProcess: !isLlmCleanupEnabled(),
+              skipPostProcess: !isLlmCleanupEnabled() || pluginSkipsCleanup,
               ...getEffectiveCleanupTones(),
               appAssignments: getCleanupAppAssignments(),
+              ...(systemFragments ? { systemFragments } : {}),
             }
           : undefined;
 
@@ -307,6 +346,10 @@ const stream = new Hono().get(
           onFinal: async (rawText) => {
             if (upstream !== session) return;
             rawText = sanitizeTranscriptText(rawText);
+            // One HookApi per dictation, threaded through every stage so a
+            // plugin's consume()/abort() in afterTranscribe is visible to
+            // cleanup + final rewrites (matching the batch /transcribe route).
+            const api = await createHookApi();
             // Use commitTime (when the user stopped speaking) to measure only
             // finalization + cleanup latency, not the entire recording session.
             const durationMs =
@@ -318,12 +361,29 @@ const stream = new Hono().get(
             }
 
             // Freestyle Cloud streaming. The cloud DO returns cleaned text when
-            // post-processing is on, or the raw transcript when it is off
-            // (`skipPostProcess = !isLlmCleanupEnabled()` was sent on connect).
+            // post-processing is on, or the raw transcript when it is off —
+            // either because cleanup is disabled or a `beforeCleanup` plugin
+            // skipped it (both set `skipPostProcess` on connect). When the
+            // cloud returned raw text, treat it like the cleanup-off branch so
+            // `afterTranscribe`/`Transcribed` still fire on the real transcript.
             if (voice.provider === FREESTYLE_CLOUD_PROVIDER_ID) {
-              const cloudHandledPostProcess = isLlmCleanupEnabled();
+              const cloudHandledPostProcess =
+                isLlmCleanupEnabled() && !pluginSkipsCleanup;
               const cloudText = rawText?.trim() || "";
               let text = cloudText;
+
+              // Combined cloud cleanup returns cleaned text with no separable
+              // raw transcript. An empty response (silence, or a clipped first
+              // clip on a cold provider switch) must be suppressed like every
+              // other path — otherwise we'd persist a blank history row and
+              // paste nothing. The post-process-off branch below has its own
+              // empty guard after afterTranscribe.
+              if (cloudHandledPostProcess && !cloudText) {
+                if (!closed) {
+                  ws.send(JSON.stringify({ type: "final", text: "" }));
+                }
+                return;
+              }
 
               if (!cloudHandledPostProcess) {
                 // Post-processing off: cloudText IS the raw transcript, so this
@@ -343,10 +403,12 @@ const stream = new Hono().get(
                       appContext: parseAppContext(effectiveAppContext()),
                     },
                     { text },
+                    api,
                   )
                 ).text;
-                // A plugin may consume/suppress the transcript (empty result).
-                if (!text.trim()) {
+                // A plugin may suppress the transcript explicitly via
+                // consume()/abort() or implicitly by emptying the text.
+                if (api.control.state !== "running" || !text.trim()) {
                   if (!closed) {
                     ws.send(JSON.stringify({ type: "final", text: "" }));
                   }
@@ -358,11 +420,18 @@ const stream = new Hono().get(
               // afterTranscribe. The dictionary + afterCleanup hook are
               // local-only, so still apply them here in both cases.
 
-              const finalText = await applyFinalRewrites(
+              const rewritten = await applyFinalRewrites(
                 text,
                 effectiveAppContext(),
                 cloudText,
+                api,
               );
+              // An afterCleanup plugin may consume/abort here (the cloud path
+              // still runs that local hook); blank the delivered text so a
+              // suppressed dictation isn't pasted, and skip telemetry/history
+              // for it — matching the batch route.
+              const suppressed = api.control.state !== "running";
+              const finalText = suppressed ? "" : rewritten;
 
               const llmProvider = cloudHandledPostProcess
                 ? FREESTYLE_CLOUD_PROVIDER_ID
@@ -378,48 +447,52 @@ const stream = new Hono().get(
                   `[pipeline] cloud_stream stt_after_commit=${sttAfterCommitMs}ms session=${durationMs}ms | ${voice.provider}/${voiceDefaults!.model_id}`,
                 );
               }
-              const streamCtx = effectiveAppContext();
-              const streamParsed = parseAppContext(streamCtx);
-              const { destination: streamDest } = getRewritePromptContext(
-                streamCtx,
-                getCleanupAppAssignments(),
-              );
-              capture("streaming transcription completed", {
-                provider: voiceDefaults!.provider,
-                provider_category: voiceProviderCategory(
-                  voiceDefaults!.provider,
-                ),
-                model: voiceDefaults!.model_id,
-                duration_ms: durationMs,
-                audio_duration_ms: audioDurationMs,
-                llm_provider: llmProvider,
-                llm_model: llmModel,
-                input_tokens: 0,
-                output_tokens: 0,
-                cost_usd: 0,
-                app_name: streamParsed?.appName,
-                destination: streamDest,
-                has_app_context: !!streamCtx,
-              });
+              if (!suppressed) {
+                const streamCtx = effectiveAppContext();
+                const streamParsed = parseAppContext(streamCtx);
+                const { destination: streamDest } = getRewritePromptContext(
+                  streamCtx,
+                  getCleanupAppAssignments(),
+                );
+                capture("streaming transcription completed", {
+                  provider: voiceDefaults!.provider,
+                  provider_category: voiceProviderCategory(
+                    voiceDefaults!.provider,
+                  ),
+                  model: voiceDefaults!.model_id,
+                  duration_ms: durationMs,
+                  audio_duration_ms: audioDurationMs,
+                  llm_provider: llmProvider,
+                  llm_model: llmModel,
+                  input_tokens: 0,
+                  output_tokens: 0,
+                  cost_usd: 0,
+                  app_name: streamParsed?.appName,
+                  destination: streamDest,
+                  has_app_context: !!streamCtx,
+                });
+              }
               if (!closed) {
                 ws.send(JSON.stringify({ type: "final", text: finalText }));
               }
-              try {
-                saveProcessedHistory({
-                  rawText: cloudText,
-                  cleanedText: finalText !== cloudText ? finalText : null,
-                  voiceProvider: voiceDefaults!.provider,
-                  voiceModel: voiceDefaults!.model_id,
-                  llmProvider,
-                  llmModel,
-                  durationMs,
-                  audioDurationMs,
-                  inputTokens: 0,
-                  outputTokens: 0,
-                  costUsd: 0,
-                });
-              } catch (err) {
-                log.error(`Failed to save history: ${err}`);
+              if (!suppressed) {
+                try {
+                  saveProcessedHistory({
+                    rawText: cloudText,
+                    cleanedText: finalText !== cloudText ? finalText : null,
+                    voiceProvider: voiceDefaults!.provider,
+                    voiceModel: voiceDefaults!.model_id,
+                    llmProvider,
+                    llmModel,
+                    durationMs,
+                    audioDurationMs,
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    costUsd: 0,
+                  });
+                } catch (err) {
+                  log.error(`Failed to save history: ${err}`);
+                }
               }
               return;
             }
@@ -436,10 +509,13 @@ const stream = new Hono().get(
                   appContext: parseAppContext(effectiveAppContext()),
                 },
                 { text: rawText },
+                api,
               )
             ).text;
 
-            if (!rawText?.trim()) {
+            // A plugin may suppress the dictation explicitly (consume/abort) or
+            // implicitly by emptying the transcript — either skips cleanup.
+            if (api.control.state !== "running" || !rawText?.trim()) {
               ws.send(JSON.stringify({ type: "final", text: "" }));
               return;
             }
@@ -462,6 +538,7 @@ const stream = new Hono().get(
                   ? "streaming"
                   : "batch",
               ...(useFastHandoff ? { includeTimings: true } : {}),
+              api,
             });
 
             cleanup
@@ -487,43 +564,53 @@ const stream = new Hono().get(
                     );
                   }
                 }
-                const ppCtx = effectiveAppContext();
-                capture("streaming transcription completed", {
-                  provider: voiceDefaults!.provider,
-                  provider_category: voiceProviderCategory(
-                    voiceDefaults!.provider,
-                  ),
-                  model: voiceDefaults!.model_id,
-                  duration_ms: totalDurationMs,
-                  audio_duration_ms: audioDurationMs,
-                  llm_provider: pp.llmProvider,
-                  llm_model: pp.llmModel,
-                  input_tokens: pp.inputTokens,
-                  output_tokens: pp.outputTokens,
-                  cost_usd: pp.costUsd,
-                  app_name: parseAppContext(ppCtx)?.appName,
-                  destination: pp.destination,
-                  has_app_context: !!ppCtx,
-                });
-                if (!closed) {
-                  ws.send(JSON.stringify({ type: "final", text: pp.cleaned }));
-                }
-                try {
-                  saveProcessedHistory({
-                    rawText,
-                    cleanedText: pp.cleaned !== rawText ? pp.cleaned : null,
-                    voiceProvider: voiceDefaults!.provider,
-                    voiceModel: voiceDefaults!.model_id,
-                    llmProvider: pp.llmProvider,
-                    llmModel: pp.llmModel,
-                    durationMs: totalDurationMs,
-                    audioDurationMs,
-                    inputTokens: pp.inputTokens,
-                    outputTokens: pp.outputTokens,
-                    costUsd: pp.costUsd,
+                // A beforeCleanup/afterCleanup plugin may have consumed/aborted
+                // inside postProcess; blank the delivered text so a suppressed
+                // dictation isn't pasted, and skip telemetry/history for it —
+                // matching the batch route, which returns before both.
+                const suppressed = api.control.state !== "running";
+                if (!suppressed) {
+                  const ppCtx = effectiveAppContext();
+                  capture("streaming transcription completed", {
+                    provider: voiceDefaults!.provider,
+                    provider_category: voiceProviderCategory(
+                      voiceDefaults!.provider,
+                    ),
+                    model: voiceDefaults!.model_id,
+                    duration_ms: totalDurationMs,
+                    audio_duration_ms: audioDurationMs,
+                    llm_provider: pp.llmProvider,
+                    llm_model: pp.llmModel,
+                    input_tokens: pp.inputTokens,
+                    output_tokens: pp.outputTokens,
+                    cost_usd: pp.costUsd,
+                    app_name: parseAppContext(ppCtx)?.appName,
+                    destination: pp.destination,
+                    has_app_context: !!ppCtx,
                   });
-                } catch (err) {
-                  log.error(`Failed to save history: ${err}`);
+                }
+                const deliverText = suppressed ? "" : pp.cleaned;
+                if (!closed) {
+                  ws.send(JSON.stringify({ type: "final", text: deliverText }));
+                }
+                if (!suppressed) {
+                  try {
+                    saveProcessedHistory({
+                      rawText,
+                      cleanedText: pp.cleaned !== rawText ? pp.cleaned : null,
+                      voiceProvider: voiceDefaults!.provider,
+                      voiceModel: voiceDefaults!.model_id,
+                      llmProvider: pp.llmProvider,
+                      llmModel: pp.llmModel,
+                      durationMs: totalDurationMs,
+                      audioDurationMs,
+                      inputTokens: pp.inputTokens,
+                      outputTokens: pp.outputTokens,
+                      costUsd: pp.costUsd,
+                    });
+                  } catch (err) {
+                    log.error(`Failed to save history: ${err}`);
+                  }
                 }
               })
               .catch((err) => {

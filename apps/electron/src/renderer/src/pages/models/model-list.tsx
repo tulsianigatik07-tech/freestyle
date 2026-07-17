@@ -1,3 +1,9 @@
+import type { EndpointConnectFormValues } from "@freestyle-voice/validations";
+import {
+  localLlmConnectFormSchema,
+  openaiSttConnectFormSchema,
+} from "@freestyle-voice/validations";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { Badge } from "@renderer/components/ui/badge";
 import { Button } from "@renderer/components/ui/button";
 import { Input } from "@renderer/components/ui/input";
@@ -31,6 +37,7 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
+import { Controller, type Resolver, useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import {
   PICKER_MODAL_BODY,
@@ -45,7 +52,7 @@ import {
   TranscriptionPicker,
 } from "./transcription-picker";
 import type { ConfiguredModel } from "./types";
-import type { UseModels } from "./use-models";
+import type { EndpointConnectState, UseModels } from "./use-models";
 import { displayName } from "./utils";
 
 // ---------------------------------------------------------------------------
@@ -328,6 +335,7 @@ export function ModelList({
     : 0;
 
   const showLocalLlmForm = type === "llm" && localOnly;
+  const showOpenaiSttForm = type === "voice" && cloudOnly;
 
   const scopedTitle =
     type === "voice"
@@ -417,6 +425,7 @@ export function ModelList({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {showLocalLlmForm && <LocalLlmConnect m={m} />}
+        {showOpenaiSttForm && <OpenaiSttConnect m={m} />}
         {visible.length === 0 ? (
           <ListEmptyState
             type={type}
@@ -707,72 +716,137 @@ function ListEmptyState({
 }
 
 function LocalLlmConnect({ m }: { m: UseModels }): React.JSX.Element {
+  return (
+    <EndpointConnectForm
+      connect={m.localLlm}
+      resolver={zodResolver(localLlmConnectFormSchema)}
+      description="Connect to Ollama, LM Studio, or another OpenAI-compatible server running locally."
+      urlPlaceholder="http://localhost:11434"
+    />
+  );
+}
+
+function OpenaiSttConnect({ m }: { m: UseModels }): React.JSX.Element {
+  return (
+    <EndpointConnectForm
+      connect={m.openaiStt}
+      resolver={zodResolver(openaiSttConnectFormSchema)}
+      description="Point OpenAI transcription at a self-hosted or OpenAI-compatible server (vLLM, LiteLLM, LM Studio). Leave the URL empty to use OpenAI."
+      urlPlaceholder="https://example.com/v1"
+    />
+  );
+}
+
+/**
+ * Shared connect form for OpenAI-compatible endpoints (local LLM, custom STT).
+ * Drives a react-hook-form with inline validation from the shared schema; the
+ * Test button persists the values then probes the endpoint via the hook.
+ */
+function EndpointConnectForm({
+  connect,
+  resolver,
+  description,
+  urlPlaceholder,
+}: {
+  connect: EndpointConnectState;
+  resolver: Resolver<EndpointConnectFormValues>;
+  description: string;
+  urlPlaceholder: string;
+}): React.JSX.Element {
   const [showKey, setShowKey] = useState(false);
-  const { localLlm } = m;
+  const {
+    control,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<EndpointConnectFormValues>({
+    resolver,
+    defaultValues: { url: connect.initialUrl, apiKey: connect.initialApiKey },
+    mode: "onBlur",
+  });
 
   return (
     <div className="border-border border-b px-5 py-4">
       <p className="text-muted-foreground mb-4 text-[13px] leading-relaxed">
-        Connect to Ollama, LM Studio, or another OpenAI-compatible server
-        running locally.
+        {description}
       </p>
       <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void localLlm.test();
-        }}
+        onSubmit={handleSubmit((values) => connect.test(values))}
         className="space-y-3"
       >
-        <div className="flex items-center gap-2">
-          <Input
-            type="text"
-            value={localLlm.url}
-            onChange={(e) => {
-              localLlm.setUrl(e.target.value);
-              localLlm.clearStatus();
-            }}
-            placeholder="http://localhost:11434"
-            className="min-w-0 flex-1"
-          />
-          <Button
-            type="submit"
-            variant="secondary"
-            size="sm"
-            disabled={localLlm.testing}
-            className="shrink-0"
-          >
-            {localLlm.testing ? (
-              <span className="flex items-center gap-1.5">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Testing…
-              </span>
-            ) : (
-              "Test"
-            )}
-          </Button>
-        </div>
-        <InputGroup>
-          <InputGroupInput
-            type={showKey ? "text" : "password"}
-            value={localLlm.apiKey}
-            onChange={(e) => localLlm.setApiKey(e.target.value)}
-            placeholder="API key (optional)"
-          />
-          <RevealToggle
-            revealed={showKey}
-            onToggle={() => setShowKey(!showKey)}
-            label="API key"
-          />
-        </InputGroup>
-        {localLlm.connected === true && (
-          <p className="text-primary text-[12px]">
-            Connected · {localLlm.models.length}{" "}
-            {localLlm.models.length === 1 ? "model" : "models"} found
+        <Controller
+          control={control}
+          name="url"
+          render={({ field }) => (
+            <div className="flex items-center gap-2">
+              <Input
+                type="text"
+                name={field.name}
+                ref={field.ref}
+                value={field.value}
+                onChange={(e) => {
+                  field.onChange(e);
+                  connect.clearStatus();
+                }}
+                onBlur={field.onBlur}
+                placeholder={urlPlaceholder}
+                aria-invalid={errors.url ? true : undefined}
+                className="min-w-0 flex-1"
+              />
+              <Button
+                type="submit"
+                variant="secondary"
+                size="sm"
+                disabled={connect.testing}
+                className="shrink-0"
+              >
+                {connect.testing ? (
+                  <span className="flex items-center gap-1.5">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Testing…
+                  </span>
+                ) : (
+                  "Test"
+                )}
+              </Button>
+            </div>
+          )}
+        />
+        {errors.url && (
+          <p className="text-destructive text-[12px] leading-snug">
+            {errors.url.message}
           </p>
         )}
-        {localLlm.connected === false && localLlm.error && (
+        <Controller
+          control={control}
+          name="apiKey"
+          render={({ field }) => (
+            <InputGroup>
+              <InputGroupInput
+                type={showKey ? "text" : "password"}
+                name={field.name}
+                ref={field.ref}
+                value={field.value}
+                onChange={field.onChange}
+                onBlur={field.onBlur}
+                placeholder="API key (optional)"
+              />
+              <RevealToggle
+                revealed={showKey}
+                onToggle={() => setShowKey(!showKey)}
+                label="API key"
+              />
+            </InputGroup>
+          )}
+        />
+        {connect.connected === true && (
+          <p className="text-primary text-[12px]">
+            Connected · {connect.models.length}{" "}
+            {connect.models.length === 1 ? "model" : "models"} found
+          </p>
+        )}
+        {connect.connected === false && connect.error && (
           <p className="text-destructive text-[12px] leading-snug">
-            {localLlm.error}
+            {connect.error}
           </p>
         )}
       </form>

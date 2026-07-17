@@ -4,6 +4,7 @@ import { CloudProfileButton } from "@renderer/components/cloud-profile";
 import { Badge } from "@renderer/components/ui/badge";
 import { LINKS } from "@renderer/lib/links";
 import { IS_MAC, MOD_LABEL } from "@renderer/lib/platform";
+import { listPlugins } from "@renderer/lib/plugins-api";
 import { cn } from "@renderer/lib/utils";
 import {
   pluginDisplayName,
@@ -194,7 +195,7 @@ export default function AppShell(): React.JSX.Element {
 
   const { data: plugins = [] } = useQuery({
     queryKey: ["plugins"],
-    queryFn: () => window.api.refreshPlugins(),
+    queryFn: () => listPlugins(),
   });
 
   const pluginNav = usePluginNavItems(plugins);

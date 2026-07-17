@@ -11,6 +11,13 @@ import {
 import { Input } from "@renderer/components/ui/input";
 import { SegmentedControl } from "@renderer/components/ui/segmented-control";
 import { usePersistentState } from "@renderer/hooks/use-persistent-state";
+import {
+  getPluginCatalog,
+  installPlugin,
+  listPlugins,
+  setPluginEnabled,
+  uninstallPlugin,
+} from "@renderer/lib/plugins-api";
 import type {
   PluginCatalogEntry,
   PluginInfo,
@@ -49,7 +56,7 @@ export default function PluginsPage(): React.JSX.Element {
 
   const { data: plugins = [], isLoading: loading } = useQuery({
     queryKey: ["plugins"],
-    queryFn: () => window.api.refreshPlugins(),
+    queryFn: () => listPlugins(),
     placeholderData: keepPreviousData,
   });
 
@@ -96,7 +103,7 @@ export default function PluginsPage(): React.JSX.Element {
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t("plugins.searchPlaceholder")}
               aria-label={t("plugins.searchPlaceholder")}
-              className="h-9 pl-9 text-[13px]"
+              className="h-10 pl-9 text-[13px]"
             />
           </div>
         </div>
@@ -210,15 +217,16 @@ function PluginCard({
 
   const [busy, setBusy] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const toggle = async (enabled: boolean): Promise<void> => {
-    onChange(await window.api.setPluginEnabled(plugin.specifier, enabled));
+    onChange(await setPluginEnabled(plugin.specifier, enabled));
   };
 
   const uninstall = async (): Promise<void> => {
     setBusy(true);
     try {
-      onChange(await window.api.uninstallPlugin(plugin.specifier));
+      onChange(await uninstallPlugin(plugin.specifier));
     } finally {
       setBusy(false);
     }
@@ -227,7 +235,7 @@ function PluginCard({
   const doUpdate = async (): Promise<void> => {
     setUpdating(true);
     try {
-      onChange(await window.api.installPlugin(plugin.specifier));
+      onChange(await installPlugin(plugin.specifier));
       // Invalidate the update-check cache so the badge disappears immediately.
       void queryClient.invalidateQueries({ queryKey: ["plugin-updates"] });
     } catch {
@@ -315,7 +323,7 @@ function PluginCard({
             {updating ? t("plugins.updating") : t("plugins.update")}
           </Button>
         ) : null}
-        <DropdownMenu>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
@@ -328,7 +336,12 @@ function PluginCard({
           <DropdownMenuContent align="end">
             {!plugin.missing ? (
               <>
-                <DropdownMenuItem onClick={() => void toggle(!plugin.enabled)}>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void toggle(!plugin.enabled);
+                  }}
+                >
                   {t(
                     plugin.enabled
                       ? "plugins.disablePlugin"
@@ -341,7 +354,10 @@ function PluginCard({
             <DropdownMenuItem
               variant="destructive"
               disabled={busy}
-              onClick={() => void uninstall()}
+              onClick={() => {
+                setMenuOpen(false);
+                void uninstall();
+              }}
             >
               {t("plugins.uninstall")}
             </DropdownMenuItem>
@@ -367,10 +383,7 @@ function BrowseTab({
 
   const { data: catalog, isError: error } = useQuery({
     queryKey: ["plugin-catalog"],
-    queryFn: async () => {
-      const res = await window.api.getPluginCatalog();
-      return res.plugins;
-    },
+    queryFn: () => getPluginCatalog(),
     placeholderData: keepPreviousData,
     retry: 1,
   });
@@ -442,7 +455,7 @@ function CatalogCard({
     setBusy(true);
     setError(null);
     try {
-      onChange(await window.api.installPlugin(entry.npmName));
+      onChange(await installPlugin(entry.npmName));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
