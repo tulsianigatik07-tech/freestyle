@@ -26,12 +26,18 @@ const ANCHOR = "resource_bundle_signing_fix";
 
 const INJECT = `
     # ${ANCHOR}
-    # Xcode 14+ signs resource bundles by default; disable it so EAS builds
-    # don't require a development team on every pod resource-bundle target.
+    # Xcode 14+ signs resource bundles by default, which requires a development
+    # team on every pod resource-bundle target. Prebuild's Podfile doesn't set
+    # one, so EAS fails. Disable signing for resource bundles (they're signed as
+    # part of the host app) and clear any team requirement.
     installer.pods_project.targets.each do |target|
       if target.respond_to?(:product_type) && target.product_type == "com.apple.product-type.bundle"
         target.build_configurations.each do |bundle_config|
           bundle_config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+          bundle_config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
+          bundle_config.build_settings["CODE_SIGN_IDENTITY"] = ""
+          bundle_config.build_settings["EXPANDED_CODE_SIGN_IDENTITY"] = ""
+          bundle_config.build_settings["DEVELOPMENT_TEAM"] = ""
         end
       end
     end
